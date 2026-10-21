@@ -1,0 +1,30 @@
+{% extends "base.html" %}{% from "_prio.html" import prio %}
+{% block title %}{{ '主機×CVE' if view=='summary' else '明細' }}{% endblock %}
+{% block body %}
+<div class="card intro"><b>明細</b>：比對結果，以「<b>主機 × 套件 × CVE</b>」為單位，列出已安裝／執行中版本、修正版本、處理方式（升級／重開機）與歷史（首次發現、已解決）。
+只含<b>已有修正版本、主機需要更新</b>的項目；官方還沒修正的請看「<a href="{{ url_for('impact_page') }}">受影響主機</a>」的「尚無修正」。</div>
+<form class="card" method="get">
+ <input type="hidden" name="view" value="{{ view }}">
+ 主機 <input name="host" value="{{ f.host or '' }}" size="14"> CVE <input name="cve" value="{{ f.cve or '' }}" size="14">
+ 套件 <input name="package" value="{{ f.package or '' }}" size="12">
+ 最低等級 <select name="priority">{% for p in ["", "critical","high","medium","low","negligible"] %}<option {% if f.priority==p %}selected{% endif %}>{{ p }}</option>{% endfor %}</select>
+ 狀態 <select name="status">{% for s in ["", "fix-available","fix-in-pro","no-fix"] %}<option {% if f.status==s %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>
+ <select name="state">{% for k,v in [("open","未解決"),("resolved","已解決"),("all","全部")] %}<option value="{{k}}" {% if f.state==k %}selected{% endif %}>{{v}}</option>{% endfor %}</select>
+ <label><input type="checkbox" name="excepted" value="1" {% if f.show_excepted %}checked{% endif %}>含例外</label>
+ <button>查詢</button>
+ <a href="{{ export_url }}">匯出 CSV</a>
+</form>
+<p class="muted">共 {{ rows|length }} 筆{% if rows|length > limit %}（只顯示前 {{ limit }} 筆，完整資料請匯出 CSV）{% endif %}</p>
+<table>
+{% if view == 'summary' %}
+<tr><th>主機</th><th>CVE</th><th>等級</th><th>狀態</th><th>受影響套件（目前&gt;修正 [處理]）</th><th>首次發現</th><th>例外</th></tr>
+{% for r in rows[:limit] %}<tr><td>{{ r.hostname }}</td><td><a href="{{ url_for('cve', cve=r.cve) }}">{{ r.cve }}</a></td><td>{{ prio(r.priority) }}</td>
+<td>{{ r.status }}</td><td>{{ r.packages }}</td><td class="muted">{{ r.first_seen }}</td><td>{{ r.exception }}</td></tr>{% endfor %}
+{% else %}
+<tr><th>主機</th><th>CVE</th><th>等級</th><th>狀態</th><th>套件</th><th>已安裝</th><th>執行中</th><th>修正版本</th><th>處理</th><th>首次發現</th><th>解決</th><th>例外</th></tr>
+{% for r in rows[:limit] %}<tr><td>{{ r.hostname }}</td><td><a href="{{ url_for('cve', cve=r.cve) }}">{{ r.cve }}</a></td><td>{{ prio(r.priority) }}</td>
+<td>{{ r.status }}</td><td>{{ r.package }}</td><td>{{ r.installed }}</td><td>{{ r.running }}</td><td>{{ r.fixed }}</td><td>{{ r.action }}</td>
+<td class="muted">{{ r.first_seen }}</td><td class="muted">{{ r.resolved_at or '' }}</td><td>{{ r.exception }}</td></tr>{% endfor %}
+{% endif %}
+</table>
+{% endblock %}

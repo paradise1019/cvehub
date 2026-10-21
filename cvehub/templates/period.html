@@ -1,0 +1,43 @@
+{% extends "base.html" %}{% from "_pager.html" import pager %}
+{% block title %}輸出報表{% endblock %}
+{% block body %}
+<div class="card intro"><b>輸出報表</b>：依 <b>CVE 公開日期</b>（例如一季），列出 Ubuntu 官方對每個 CVE × 套件 × 版本的處理狀態，可下載 Excel。
+ <b>跟受管主機無關</b>；要看哪些主機受影響，請到「<a href="{{ url_for('impact_page') }}">受影響主機</a>」或點 CVE 編號。</div>
+<form class="card" method="get">
+ 從 <input type="date" name="from" value="{{ f.from }}" required>
+ 到 <input type="date" name="to" value="{{ f.to }}" required>
+ 最低等級 <select name="min_priority">{% for lv in levels %}<option {% if f.min_priority==lv %}selected{% endif %}>{{ lv }}</option>{% endfor %}</select>
+ 明細狀態 <select name="status">{% for k, v in status_filters %}<option value="{{ k }}" {% if f.status==k %}selected{% endif %}>{{ v }}</option>{% endfor %}</select>
+ {% if sort_key %}<input type="hidden" name="sort" value="{{ sort_key }}"><input type="hidden" name="dir" value="{{ sort_dir }}">{% endif %}
+ <button>查詢</button> <a href="{{ export_url }}">下載 Excel</a>
+ <div style="margin-top:.4rem">快速選擇：{% for name, a, b in quarters[:6] %}<a href="{{ url_for('period_report', **dict(f, **{'from': a, 'to': b})) }}">{{ name }}</a>{% if not loop.last %}・{% endif %}{% endfor %}</div>
+</form>
+<details class="card"><summary><b>狀態說明</b></summary>
+<table style="width:auto;margin-top:.5rem"><tr><th>狀態</th><th>說明</th><th>Ubuntu 官方名稱</th></tr>
+{% for code, en, zh, desc in statuses %}<tr><td class="s-{{ code }} nowrap">{{ zh }}</td><td>{{ desc }}</td><td class="muted">{{ en }}</td></tr>{% endfor %}</table>
+<p class="muted">20.04 標準支援已結束，以 Ubuntu Pro（ESM）為準；22.04／24.04 以一般套件庫為準，只有 Pro 才修正時標「（Pro）」。修正版本是第一個修正的版本。
+kernel 只列 linux、各版本最新的 HWE 與主機上有裝的 HWE（雲端／OEM 變體不列）。
+{% if not have_vex %}<b>尚未匯入 VEX：狀態只分「已修正／受影響」。</b>{% endif %}</p></details>
+
+<h3>統計 <span class="muted">（以 CVE 計；一個 CVE 在某版本有多個套件時，取最需要注意的狀態；點數字看明細）</span></h3>
+<table class="stat"><tr><th class="lv">等級</th><th class="rel">版本</th><th class="cnt">CVE 數</th>
+{% for c in summary.statuses %}<th class="st s-{{ c }}" title="{{ label_en[c] }}">{{ label[c] }}</th>{% endfor %}</tr>
+{% for lv in summary.levels %}{% set s = summary.by_level[lv] %}{% for col, rel in releases %}
+<tr>{% if loop.first %}<td class="lv" rowspan="{{ releases|length }}"><span class="tag p-{{ lv }}">{{ lv }}</span></td>{% endif %}<td class="rel">Ubuntu {{ rel }}</td>
+{% if loop.first %}<td class="cnt" rowspan="{{ releases|length }}">{{ s.cves }}</td>{% endif %}
+{% for c in summary.statuses %}<td class="n">{% if s[col][c] %}<a href="{{ url_for('period_report', **dict(f, status=c)) }}">{{ s[col][c] }}</a>{% else %}<span class="muted">0</span>{% endif %}</td>{% endfor %}</tr>
+{% endfor %}{% endfor %}
+<tr><th colspan="2">合計 CVE</th><th class="cnt">{{ summary.total }}</th><td colspan="{{ summary.statuses|length }}" class="muted">其中 kernel {{ summary.total_kernel }}</td></tr></table>
+
+<h3>明細 <span class="muted">（共 {{ total_rows }} 列{% if f.status %}，篩選：{{ dict(status_filters)[f.status] }}{% endif %}）</span></h3>
+{% set pargs = dict(f, **sort_args) %}
+{{ pager('period_report', pargs, page, pages, total_rows, per_page) }}
+{% macro th(col, label) %}{% set nd = 'desc' if (sort_key == col and sort_dir == 'asc') else 'asc' %}<th class="nowrap"><a href="{{ url_for('period_report', **dict(f, sort=col, dir=nd)) }}" style="color:inherit;text-decoration:none">{{ label }}{% if sort_key == col %} {{ '▲' if sort_dir == 'asc' else '▼' }}{% else %} <span class="muted">⇅</span>{% endif %}</a></th>{% endmacro %}
+<table><tr>{{ th('cve_id','CVE') }}{{ th('priority','等級') }}{{ th('published','公開日期') }}{{ th('package','套件') }}{% for col, rel in releases %}{{ th(col, 'Ubuntu ' ~ rel) }}{% endfor %}{{ th('description','說明') }}</tr>
+{% for r in rows %}<tr><td class="nowrap"><a href="{{ url_for('cve', cve=r.cve_id) }}">{{ r.cve_id }}</a></td><td><span class="tag p-{{ r.priority }}">{{ r.priority }}</span></td>
+<td class="muted nowrap">{{ r.published }}</td><td class="nowrap">{{ r.package or '（無相關套件）' }}</td>
+{% for col, rel in releases %}<td class="relcol s-{{ r.codes[col] }}" title="{{ label_en[r.codes[col]] }}">{{ r[col] }}</td>{% endfor %}
+<td class="muted">{{ r.description[:120] }}{% if r.description|length > 120 %}…{% endif %}</td></tr>{% endfor %}
+</table>
+{{ pager('period_report', pargs, page, pages, total_rows, per_page) }}
+{% endblock %}

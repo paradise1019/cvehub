@@ -1,0 +1,22 @@
+{% extends "base.html" %}{% from "_prio.html" import prio %}
+{% block title %}{{ cve }}{% endblock %}
+{% block body %}
+<div class="card"><h2 style="margin:.2rem 0">{{ cve }}</h2>
+{% if v %}等級 {{ prio(v.priority) }}・CVSS {{ v.cvss or '-' }}・公開 {{ (v.published or '-')[:10] }}{% else %}<span class="muted">OSV 資料沒有這個 CVE</span>{% endif %}
+・<a href="https://ubuntu.com/security/{{ cve }}" target="_blank" rel="noopener noreferrer">Ubuntu 安全頁面</a>
+{% if v and v.details %}<p class="muted" style="white-space:pre-wrap">{{ v.details[:1500] }}{% if v.details|length > 1500 %}…{% endif %}</p>{% endif %}</div>
+
+<h3>受管主機</h3>
+<p class="muted">待更新＝已有修正版本、主機還沒更新；尚無修正＝主機有裝、官方還沒有修正；已修正＝曾經待更新、已更新；不受影響＝有裝但官方判定不受影響或已是修正版本。</p>
+{% if hosts %}<table><tr><th>主機</th><th>Ubuntu</th><th>套件</th><th>狀態</th><th>官方狀態</th><th>已安裝／執行中</th><th>修正版本</th><th>處理</th><th>首次發現</th><th>解決</th><th>例外</th></tr>
+{% for r in hosts %}<tr{% if r.state == 'ok' %} class="muted"{% endif %}><td><a href="{{ url_for('host', hid=r.host_id) }}">{{ r.hostname }}</a></td><td>{{ r.release }}</td><td>{{ r.package }}</td>
+<td>{% if r.state in ('pending', 'nofix') %}<b>{{ r.state_label }}</b>{% else %}{{ r.state_label }}{% endif %}</td><td class="s-{{ r.official_code }}" title="{{ label_en[r.official_code] }}">{{ r.official }}</td>
+<td>{{ r.installed or '' }}</td><td>{{ r.fixed or '' }}</td><td>{{ r.action or '' }}</td><td class="muted">{{ r.first_seen or '' }}</td><td class="muted">{{ r.resolved_at or '' }}</td><td>{{ r.exception }}</td></tr>{% endfor %}
+</table>{% else %}<p>沒有主機裝了這個 CVE 相關的套件。</p>{% endif %}
+
+<h3>官方狀態（套件 × 版本）</h3>
+{% if official %}<table style="width:auto"><tr><th>套件</th>{% for rel in releases %}<th>Ubuntu {{ rel }}</th>{% endfor %}</tr>
+{% for src, cells in official|dictsort %}<tr><td>{{ src }}</td>{% for rel in releases %}<td class="s-{{ cells[rel][0] }}" title="{{ label_en[cells[rel][0]] }}">{{ cells[rel][1] }}</td>{% endfor %}</tr>{% endfor %}
+</table>{% else %}<p class="muted">沒有 {{ releases|join('／') }} 的官方資料。</p>{% endif %}
+{% if not have_vex %}<p class="muted">尚未匯入 VEX：狀態只分「已修正／受影響」。</p>{% endif %}
+{% endblock %}

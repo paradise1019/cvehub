@@ -1,0 +1,27 @@
+{% extends "base.html" %}{% from "_prio.html" import prio %}
+{% block title %}總覽{% endblock %}
+{% block body %}
+<div class="grid">
+ {% for p in ["critical","high","medium","low"] %}
+ <div class="card"><div class="muted">{{ p }}（主機×CVE）</div>
+  <div class="big"><a href="{{ url_for('findings', view='summary', priority=p) }}">{{ by_prio.get(p, 0) }}</a></div></div>
+ {% endfor %}
+ <div class="card"><div class="muted">主機</div><div class="big">{{ hosts|length }}</div></div>
+</div>
+<div class="card"><b>OSV 資料：</b>{% if osv %}{{ osv.filename }}（檔案日期 {{ osv.file_mtime }}，匯入 {{ osv.imported_at }}，CVE {{ osv.cve_count }}）
+ <span class="muted">sha256 {{ osv.sha256[:16] }}…</span>{% else %}無{% endif %}</div>
+<h3>主機</h3>
+<table><tr><th>主機</th><th>IP</th><th>Ubuntu</th><th>Pro</th><th>套件</th><th>執行中 kernel</th><th>critical</th><th>high</th><th>medium</th><th>low</th><th>需重開機</th><th>最後同步</th></tr>
+{% for h in hosts %}{% set c = per_host.get(h.hostname, {}) %}
+<tr><td><a href="{{ url_for('host', hid=h.id) }}">{{ h.hostname }}</a></td><td>{{ h.ip or '' }}</td><td>{{ h.release }}</td>
+ <td>{{ {1:'是',0:'否'}.get(h.pro_attached, '?') }}</td><td class="num">{{ h.package_count }}</td>
+ <td>{% if h.kernel_status == 'ok' %}{{ h.kernel_version }}{% elif h.kernel_status == 'error' and h.kernel_version %}{{ h.kernel_version }} <span class="muted">（查詢失敗，沿用上次資料）</span>{% else %}<span class="muted">{{ {'stale':'資料過期','missing':'無資料','disabled':'未設定 kernel API','error':'查詢失敗'}.get(h.kernel_status, h.kernel_status) }}</span>{% endif %}</td>
+ {% for p in ["critical","high","medium","low"] %}<td class="num">{% if c.get(p) %}<a href="{{ url_for('findings', view='summary', host=h.hostname, priority=p) }}">{{ c.get(p) }}</a>{% else %}0{% endif %}</td>{% endfor %}
+ <td>{% if c.get('reboot') %}<b>是</b>{% endif %}</td><td class="muted">{{ h.last_seen }}</td></tr>
+{% endfor %}</table>
+<h3>最近同步</h3>
+<table><tr><th>開始</th><th>結束</th><th>結果</th><th>主機</th><th>未解決</th><th>新增</th><th>已解決</th><th>訊息</th></tr>
+{% for r in last %}<tr><td>{{ r.started_at }}</td><td>{{ r.finished_at or '' }}</td><td>{{ r.status }}</td><td class="num">{{ r.hosts or '' }}</td>
+<td class="num">{{ r.open_findings or '' }}</td><td class="num">{{ r.new_findings or '' }}</td><td class="num">{{ r.resolved_findings or '' }}</td><td>{{ r.message or '' }}</td></tr>{% endfor %}
+</table>
+{% endblock %}

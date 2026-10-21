@@ -1,0 +1,12 @@
+{% extends "base.html" %}{% from "_prio.html" import prio %}
+{% block title %}{{ h.hostname }}{% endblock %}
+{% block body %}
+<div class="card"><h2 style="margin:.2rem 0">{{ h.hostname }}</h2>
+IP {{ h.ip or '-' }}・Ubuntu {{ h.release }}・Pro：{{ {1:'是',0:'否'}.get(h.pro_attached, '?') }}・套件 {{ h.package_count }}・Landscape ID {{ h.landscape_id }}・最後同步 {{ h.last_seen }}<br>
+執行中 kernel：{% if h.kernel_status in ('ok', 'error') and h.kernel_version %}{{ h.kernel_release }}（{{ h.kernel_version }}，收集於 {{ h.kernel_collected_at }}）{% if h.kernel_status == 'error' %}<span class="muted">：kernel API 查詢失敗，沿用上次資料</span>{% endif %}{% else %}{{ h.kernel_status }}{% endif %}</div>
+<p>{% for k,v in [("open","未解決"),("resolved","已解決"),("all","全部")] %}<a href="{{ url_for('host', hid=h.id, state=k) }}">{% if state==k %}<b>{{v}}</b>{% else %}{{v}}{% endif %}</a> {% endfor %}
+・<a href="{{ url_for('findings', host=h.hostname, format='csv', state=state) }}">匯出 CSV</a></p>
+<table><tr><th>CVE</th><th>等級</th><th>狀態</th><th>套件</th><th>已安裝</th><th>執行中</th><th>修正版本</th><th>處理</th><th>首次發現</th><th>解決</th><th>例外</th></tr>
+{% for r in rows %}<tr><td><a href="{{ url_for('cve', cve=r.cve) }}">{{ r.cve }}</a></td><td>{{ prio(r.priority) }}</td><td>{{ r.status }}</td><td>{{ r.package }}</td>
+<td>{{ r.installed }}</td><td>{{ r.running }}</td><td>{{ r.fixed }}</td><td>{{ r.action }}</td><td class="muted">{{ r.first_seen }}</td><td class="muted">{{ r.resolved_at or '' }}</td><td>{{ r.exception }}</td></tr>{% endfor %}
+</table>{% endblock %}

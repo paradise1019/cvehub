@@ -1,0 +1,5 @@
+# 從內部 Nexus 安裝：pip install --index-url https://<nexus>/repository/pypi/simple -r requirements.txt
+Flask==3.1.2
+gunicorn==23.0.0
+APScheduler==3.11.0
+openpyxl==3.1.5

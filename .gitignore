@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+
+# 部署目錄裡的設定與資料：不要 commit（含金鑰、密碼、資料庫）
+.env
+.env.*
+!.env.example
+data/
+config/
+*.sqlite3
+*.tar.xz

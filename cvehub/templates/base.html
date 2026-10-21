@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}cvehub{% endblock %} - cvehub</title>
+<style>
+ body{font-family:system-ui,"Noto Sans TC",sans-serif;margin:0;color:#1f2328;background:#f6f8fa}
+ header{background:#24292f;color:#fff;padding:.6rem 1rem;display:flex;gap:1.2rem;align-items:center;flex-wrap:wrap}
+ header a{color:#fff;text-decoration:none} header b{font-size:1.1rem}
+ main{padding:1rem;max-width:1400px;margin:auto}
+ table{border-collapse:collapse;width:100%;background:#fff;font-size:.9rem}
+ th,td{border:1px solid #d0d7de;padding:.3rem .5rem;text-align:left;vertical-align:top}
+ th{background:#eaeef2;position:sticky;top:0}
+ .card{background:#fff;border:1px solid #d0d7de;border-radius:6px;padding:.8rem 1rem;margin-bottom:1rem}
+ .warn{background:#fff8c5;border-color:#d4a72c}.err{background:#ffebe9;border-color:#ff8182}
+ .p-critical{background:#cf222e;color:#fff}.p-high{background:#fb8500;color:#fff}.p-medium{background:#fff1b8}
+ .p-low{background:#ddf4ff}.p-negligible{background:#eee}
+ .tag{padding:0 .4rem;border-radius:4px;font-size:.8rem;white-space:nowrap}
+ .num{text-align:right} .muted{color:#656d76;font-size:.85rem}
+ form.inline{display:inline} input,select,button{font:inherit;padding:.2rem .4rem}
+ .grid{display:flex;gap:1rem;flex-wrap:wrap} .grid .card{flex:1;min-width:160px;text-align:center}
+ .big{font-size:2rem;font-weight:600}
+ .s-needs-evaluation{background:#ffb3ad;font-weight:600}.s-vulnerable{background:#ffd8a8}.s-vulnerable-wip{background:#ffe8a3}
+ .s-deferred{background:#fff1b8}.s-ignored,.s-unknown{background:#e1e4e8}.s-fixed{background:#d3f9d8}
+ .s-not-affected,.s-not-in-release{background:#f6f8fa;color:#656d76}.s-none{color:#8c959f}
+ .intro{border-left:4px solid #0969da}
+ .nowrap{white-space:nowrap}
+ td.relcol{width:14em;min-width:14em;word-break:break-all}
+ table.stat{width:auto} table.stat td,table.stat th{vertical-align:middle}
+ table.stat th.st{width:6.6em;text-align:center;white-space:nowrap} table.stat td.n{text-align:right;width:6.6em}
+ table.stat th.lv,table.stat td.lv{width:6em} table.stat th.rel,table.stat td.rel{width:7.5em;white-space:nowrap}
+ table.stat th.cnt,table.stat td.cnt{width:5.5em;text-align:right}
+ .pager{margin:.6rem 0;display:flex;gap:.6rem;flex-wrap:wrap;align-items:center}
+ .pager a,.pager b{padding:.1rem .45rem;border:1px solid #d0d7de;border-radius:4px;background:#fff;text-decoration:none}
+ .pager b{background:#0969da;color:#fff;border-color:#0969da}
+</style></head><body>
+<header><b>cvehub</b>
+ <a href="{{ url_for('index') }}">總覽</a>
+ <a href="{{ url_for('impact_page') }}">受影響主機</a>
+ <a href="{{ url_for('findings') }}">明細</a>
+ <a href="{{ url_for('exceptions') }}">例外</a>
+ <a href="{{ url_for('period_report') }}">輸出報表</a>
+ <a href="{{ url_for('data') }}">資料匯入</a>
+ <span style="flex:1"></span>
+ <form class="inline" method="post" action="{{ url_for('sync_now') }}"><button {% if job.running %}disabled{% endif %}>立即同步</button></form>
+ <span class="muted" style="color:#ccc">v{{ version }}</span>
+</header>
+<main>
+{% if job.message %}<div class="card {% if '失敗' in job.message %}err{% endif %}">{{ job.message }}</div>{% endif %}
+{% if not osv %}<div class="card err">尚未匯入 OSV 資料：到「資料匯入」頁上傳 osv-all.tar.xz。</div>
+{% elif osv_stale %}<div class="card warn">OSV 資料檔日期 {{ osv.file_mtime }}，已超過 {{ cfg.OSV_STALE_WARN_DAYS }} 天，請更新。</div>{% endif %}
+{% if osv and not vex %}<div class="card warn">尚未匯入 VEX（官方狀態）：輸出報表只能分「已修正／受影響」。到「資料匯入」頁上傳 vex-all.tar.xz。</div>
+{% elif vex and vex_stale %}<div class="card warn">VEX 資料檔日期 {{ vex.file_mtime }}，已超過 {{ cfg.OSV_STALE_WARN_DAYS }} 天，請更新。</div>
+{% elif data_gap > 2 %}<div class="card warn">OSV（{{ osv.file_mtime[:10] }}）與 VEX（{{ vex.file_mtime[:10] }}）資料日期相差 {{ data_gap }} 天，兩份請一起更新。</div>{% endif %}
+{% block body %}{% endblock %}
+</main></body></html>

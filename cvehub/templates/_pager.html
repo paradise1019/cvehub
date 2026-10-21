@@ -1,0 +1,7 @@
+{% macro pager(endpoint, args, page, pages, total, per_page) %}{% if pages > 1 %}
+<div class="pager">
+ {% if page > 1 %}<a href="{{ url_for(endpoint, **dict(args, page=1)) }}">« 第一頁</a><a href="{{ url_for(endpoint, **dict(args, page=page-1)) }}">‹ 上一頁</a>{% endif %}
+ {% for p in range([1, page-3]|max, [pages, page+3]|min + 1) %}{% if p == page %}<b>{{ p }}</b>{% else %}<a href="{{ url_for(endpoint, **dict(args, page=p)) }}">{{ p }}</a>{% endif %}{% endfor %}
+ {% if page < pages %}<a href="{{ url_for(endpoint, **dict(args, page=page+1)) }}">下一頁 ›</a><a href="{{ url_for(endpoint, **dict(args, page=pages)) }}">最後一頁 »</a>{% endif %}
+ <span class="muted">第 {{ page }}／{{ pages }} 頁，每頁 {{ per_page }} 列，共 {{ total }} 列</span>
+</div>{% endif %}{% endmacro %}

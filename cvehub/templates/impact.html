@@ -1,0 +1,27 @@
+{% extends "base.html" %}{% from "_prio.html" import prio %}{% from "_pager.html" import pager %}
+{% block title %}受影響主機{% endblock %}
+{% block body %}
+<div class="card intro"><b>受影響主機</b>：以 <b>CVE</b> 為單位，看受管主機（來自 Landscape）有幾台受影響。
+「<b>待更新</b>」＝已有修正版本、主機還沒更新（或需要重開機）；「<b>尚無修正</b>」＝主機有裝這個套件，但官方還沒有修正（待評估／受影響／修正中／延後修正／不修正）。
+每格最多列 {{ sample }} 台主機，<b>點 CVE 編號看全部主機</b>；匯出 CSV 會列出全部主機。<br>
+<span class="muted">和「明細」的差別：明細是比對結果，以「主機 × 套件」為單位，有已安裝版本、修正版本、處理方式與歷史（首次發現、已解決），但只含<b>已有修正版本</b>的項目；
+這一頁另外加上官方還沒修正的「尚無修正」，用來回答「這個 CVE 影響哪些主機」。</span>
+{% if not have_vex %}<br><b>尚未匯入 VEX，只列得出「待更新」。</b>{% endif %}</div>
+<form class="card" method="get">
+ 最低等級 <select name="min_priority">{% for lv in levels %}<option {% if f.min_priority==lv %}selected{% endif %}>{{ lv }}</option>{% endfor %}</select>
+ CVE 公開日期 <input type="date" name="from" value="{{ f.from }}"> ～ <input type="date" name="to" value="{{ f.to }}">
+ 主機 <input name="host" value="{{ f.host }}" size="14"> CVE <input name="cve" value="{{ f.cve }}" size="16">
+ <select name="state">{% for k, v in [("", "待更新＋尚無修正"), ("pending", "只看待更新"), ("nofix", "只看尚無修正")] %}<option value="{{ k }}" {% if f.state==k %}selected{% endif %}>{{ v }}</option>{% endfor %}</select>
+ <button>查詢</button> <a href="{{ export_url }}">匯出 CSV</a>
+ <div style="margin-top:.4rem">公開日期快速選擇：<a href="{{ url_for('impact_page', **dict(f, **{'from': '', 'to': ''})) }}">不限</a>{% for name, a, b in quarters[:6] %}・<a href="{{ url_for('impact_page', **dict(f, **{'from': a, 'to': b})) }}">{{ name }}</a>{% endfor %}</div>
+</form>
+{{ pager('impact_page', f, page, pages, total_rows, per_page) }}
+<table><tr><th>CVE</th><th>等級</th><th class="nowrap">公開日期</th><th>套件</th><th class="nowrap">受影響主機數</th><th>待更新（目前→修正 處理）</th><th>尚無修正</th><th>官方狀態</th></tr>
+{% for r in rows %}<tr><td class="nowrap"><a href="{{ url_for('cve', cve=r.cve) }}">{{ r.cve }}</a></td><td>{{ prio(r.priority) }}</td><td class="muted nowrap">{{ r.published }}</td>
+<td>{{ r.package }}</td><td class="num">{{ r.host_count }}</td>
+<td>{% if r.pending_n %}<b>{{ r.pending_n }} 台</b>：{{ r.pending_sample|join('；') }}{% if r.pending_n > sample %} <a href="{{ url_for('cve', cve=r.cve) }}">…等 {{ r.pending_n }} 台</a>{% endif %}{% endif %}</td>
+<td>{% if r.nofix_n %}<b>{{ r.nofix_n }} 台</b>：{{ r.nofix_sample|join('、') }}{% if r.nofix_n > sample %} <a href="{{ url_for('cve', cve=r.cve) }}">…等 {{ r.nofix_n }} 台</a>{% endif %}{% endif %}</td>
+<td class="nowrap{% if r.needs_eval %} s-needs-evaluation{% endif %}">{{ r.official }}</td></tr>{% endfor %}
+</table>
+{{ pager('impact_page', f, page, pages, total_rows, per_page) }}
+{% endblock %}

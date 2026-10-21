@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}例外{% endblock %}
+{% block body %}
+<form class="card" method="post">
+ <b>新增例外（風險接受）</b><br>
+ 主機 <input name="host_pattern" placeholder="web01* 或 *" required size="16">
+ CVE <input name="cve" placeholder="CVE-2026-1234 或 *" required size="18">
+ 原因 <input name="reason" required size="40">
+ 到期日 <input type="date" name="expires_at"> <button>新增</button>
+ <div class="muted">例外不會刪除資料，只是在畫面與報表上標示；到期後自動失效。可用 * 萬用字元。</div>
+</form>
+<table><tr><th>主機</th><th>CVE</th><th>原因</th><th>到期日</th><th>建立者</th><th>建立時間</th><th></th></tr>
+{% for e in rows %}<tr {% if e.expires_at and e.expires_at < today %}class="muted"{% endif %}><td>{{ e.host_pattern }}</td><td>{{ e.cve }}</td><td>{{ e.reason }}</td>
+<td>{{ e.expires_at or '永久' }}{% if e.expires_at and e.expires_at < today %}（已過期）{% endif %}</td><td>{{ e.created_by }}</td><td>{{ e.created_at }}</td>
+<td><form class="inline" method="post"><button name="delete" value="{{ e.id }}">刪除</button></form></td></tr>{% endfor %}
+</table>{% endblock %}

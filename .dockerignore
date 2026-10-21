@@ -1,0 +1,5 @@
+data
+config
+.env
+mock-kernel-api
+**/__pycache__
