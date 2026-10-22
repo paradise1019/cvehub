@@ -22,7 +22,7 @@ Landscape（主機與已安裝套件）＋ kernel API（執行中的 kernel）�
 ## 2. 部署步驟
 
 照順序做，每一步都有 ✅ 確認方式；沒有出現 ✅ 的結果就先不要往下做。以下以安裝到 `/opt/cvehub`、zip 放在 `/tmp` 為例，指令都用有 sudo 權限的帳號執行。
-主機**不需要能 `docker pull`、不需要連外**：基礎 image 由別台機器準備好帶進來，Python 套件從公司 Nexus 安裝。
+主機**不需要能 `docker pull`、不需要連外**：基礎 image 由別台機器準備好帶進來，Python 套件從內部 Nexus 安裝。
 
 ### 步驟 1：確認 Docker
 ```bash
@@ -53,7 +53,7 @@ sha256sum /tmp/python-3.12-slim.tar.gz   # 和上面一致
 sudo docker load -i /tmp/python-3.12-slim.tar.gz
 ```
 ✅ `sudo docker image inspect python:3.12-slim >/dev/null && echo OK` 印出 `OK`。
-（公司內部 registry 有這個 image 時，也可以 load 那一份，並在 `.env` 的 `BASE_IMAGE=` 寫它的完整名稱，例如 `nexus.example.com:8443/python:3.12-slim`。）
+（內部 registry 有這個 image 時，也可以 load 那一份，並在 `.env` 的 `BASE_IMAGE=` 寫它的完整名稱，例如 `nexus.example.com:8443/python:3.12-slim`。）
 
 ### 步驟 4：準備設定檔與資料目錄，填建置設定
 ```bash
