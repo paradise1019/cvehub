@@ -5,6 +5,7 @@
 #   回復：sudo bash scripts/upgrade.sh --rollback backups/<時間-舊版本>
 #   不詢問：加 -y
 #   安裝目錄：預設是這支腳本的上一層；從解開的新版執行時用 CVEHUB_DIR=/opt/cvehub 指定
+#   備份：backups/ 只保留最近 5 份（CVEHUB_KEEP_BACKUPS 可改）
 #
 # 只替換程式檔；.env、data/、config/、backups/、docker-compose.override.yml 不會動。
 # 流程：備份程式與設定 → 換程式 → 建 image → 跑測試（失敗就自動還原程式，舊版容器照常運作）
@@ -17,6 +18,19 @@ CODE_ITEMS=(cvehub tests scripts django-kernel-view mock-kernel-api Dockerfile d
 die() { echo "❌ $*" >&2; exit 1; }
 info() { echo "▶ $*"; }
 
+YES=0
+ARGS=()
+for a in "$@"; do
+    if [[ "$a" == "-y" ]]; then
+        YES=1
+    elif [[ -e "$a" ]]; then
+        ARGS+=("$(cd "$(dirname "$a")" && pwd)/$(basename "$a")")    # 相對路徑先轉成絕對路徑（後面會 cd 到安裝目錄）
+    else
+        ARGS+=("$a")
+    fi
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
+
 APP_DIR="${CVEHUB_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 APP_DIR="$(cd "$APP_DIR" 2>/dev/null && pwd)" || die "找不到安裝目錄"
 [[ "$APP_DIR" == /* && "$APP_DIR" != "/" ]] || die "安裝目錄不正確：$APP_DIR"
@@ -28,6 +42,7 @@ docker info >/dev/null 2>&1 || die "無法使用 docker（請用 sudo 執行）"
 if [[ -z "${CVEHUB_UPGRADE_COPY:-}" ]]; then
     self="$(mktemp)"
     cp -- "$0" "$self"
+    if [[ $YES == 1 ]]; then set -- "$@" -y; fi
     CVEHUB_UPGRADE_COPY="$self" CVEHUB_DIR="$APP_DIR" exec bash "$self" "$@"
 fi
 TMP_DIRS=()
@@ -39,12 +54,6 @@ cleanup() {
 trap cleanup EXIT
 cd "$APP_DIR"
 
-YES=0
-ARGS=()
-for a in "$@"; do
-    if [[ "$a" == "-y" ]]; then YES=1; else ARGS+=("$a"); fi
-done
-set -- "${ARGS[@]+"${ARGS[@]}"}"
 
 confirm() {
     [[ $YES == 1 ]] && return 0
@@ -90,6 +99,15 @@ except urllib.error.HTTPError as e:
 PY
 }
 
+KEEP_BACKUPS="${CVEHUB_KEEP_BACKUPS:-5}"
+
+prune_backups() {   # 只保留最近 KEEP_BACKUPS 份（每份含資料庫，約數百 MB）
+    local old
+    ls -1d "$APP_DIR"/backups/*/ 2>/dev/null | sort | head -n -"$KEEP_BACKUPS" | while read -r old; do
+        [[ "$old" == "$APP_DIR"/backups/?*/ ]] && rm -rf -- "$old" && echo "   已刪除舊備份：$(basename "$old")"
+    done
+}
+
 upgrade() {
     local zip="$1" tmp src old new ts bk
     [[ -f "$zip" ]] || die "找不到檔案：$zip"
@@ -98,11 +116,33 @@ upgrade() {
     python3 -m zipfile -e "$zip" "$tmp/x" || die "無法解開 $zip"
     src="$(find "$tmp/x" -maxdepth 2 -name docker-compose.yml -printf '%h\n' | head -1)"
     [[ -n "$src" && -f "$src/cvehub/__init__.py" ]] || die "$zip 不是 cvehub 的程式包"
+    # 新版的更新腳本不一樣：改用新版的（更新流程以新版為準），舊的這支到此為止
+    if [[ -z "${CVEHUB_UPGRADE_HANDOVER:-}" && -f "$src/scripts/upgrade.sh" ]] && ! cmp -s "$src/scripts/upgrade.sh" "$CVEHUB_UPGRADE_COPY"; then
+        info "改用新版的更新腳本"
+        local next
+        next="$(mktemp)"
+        cp -- "$src/scripts/upgrade.sh" "$next"
+        rm -rf -- "${tmp:?}"
+        rm -f -- "${CVEHUB_UPGRADE_COPY:?}"
+        if [[ $YES == 1 ]]; then
+            CVEHUB_UPGRADE_HANDOVER=1 CVEHUB_UPGRADE_COPY="$next" CVEHUB_DIR="$APP_DIR" exec bash "$next" "$zip" -y
+        fi
+        CVEHUB_UPGRADE_HANDOVER=1 CVEHUB_UPGRADE_COPY="$next" CVEHUB_DIR="$APP_DIR" exec bash "$next" "$zip"
+    fi
     old="$(version_of "$APP_DIR")"
     new="$(version_of "$src")"
     echo "安裝目錄：$APP_DIR"
     echo "目前版本：$old → 新版本：$new"
     [[ -f "$src/CHANGELOG.md" ]] && { echo "------ 更新說明（CHANGELOG.md 開頭）------"; head -n 30 "$src/CHANGELOG.md"; echo "-----------------------------------------"; }
+    # 主機不能 docker pull：基礎 image 必須已經 docker load 進來（在動任何東西之前先檢查）
+    local base
+    base="$(sed -n 's/^BASE_IMAGE=//p' "$APP_DIR/.env" | tail -1)"
+    base="${base:-python:3.12-slim}"
+    if ! docker image inspect "$base" >/dev/null 2>&1; then
+        info "本機沒有基礎 image「$base」，嘗試 docker pull（主機不能連外時會失敗，請改用 docker load）"
+        docker pull "$base" >/dev/null 2>&1 \
+            || die "拿不到基礎 image「$base」（.env 的 BASE_IMAGE）。請先載入：sudo docker load -i <檔案>（做法見 README 步驟 3）；沒有改任何東西"
+    fi
     confirm "開始更新？（約 5–10 分鐘；中間會停機約 1 分鐘）"
 
     ts="$(date +%Y%m%d-%H%M%S)"
@@ -140,6 +180,7 @@ upgrade() {
     docker compose up -d
     info "6/6 健康檢查"
     wait_healthy
+    prune_backups
     echo "✅ 已更新到 $new。"
     echo "   有問題要回復：sudo bash $APP_DIR/scripts/upgrade.sh --rollback backups/$(basename "$bk")"
     echo "   （回復會把資料庫還原成更新前的狀態；更新後的同步結果會重新產生）"

@@ -21,66 +21,93 @@ Landscape（主機與已安裝套件）＋ kernel API（執行中的 kernel）�
 
 ## 2. 部署步驟
 
-照順序做，每一步都有 ✅ 確認方式；沒有出現 ✅ 的結果就先不要往下做。以下以安裝到 `/opt/cvehub` 為例，指令都用有 sudo 權限的帳號執行。
+照順序做，每一步都有 ✅ 確認方式；沒有出現 ✅ 的結果就先不要往下做。以下以安裝到 `/opt/cvehub`、zip 放在 `/tmp` 為例，指令都用有 sudo 權限的帳號執行。
+主機**不需要能 `docker pull`、不需要連外**：基礎 image 由別台機器準備好帶進來，Python 套件從公司 Nexus 安裝。
 
 ### 步驟 1：確認 Docker
 ```bash
-docker --version && docker compose version
+sudo docker --version && sudo docker compose version
 ```
 ✅ 兩個都印出版本（Docker 24 以上、Compose v2）。
 
-### 步驟 2：取得程式
+### 步驟 2：解開程式
+從 GitHub 下載 zip（Code → Download ZIP，或 Tags 裡某個版本的 Source code (zip)），放到 `/tmp`：
 ```bash
-sudo git clone https://github.com/paradise1019/cvehub.git /opt/cvehub
+cd /tmp && python3 -m zipfile -e /tmp/cvehub-main.zip /tmp/cvehub-src
+sudo mkdir -p /opt/cvehub
+sudo cp -a /tmp/cvehub-src/*/. /opt/cvehub/
 cd /opt/cvehub
 ```
-不能連 GitHub 的環境：在可上網的機器下載 ZIP（GitHub 頁面 Code → Download ZIP），複製過去解開到 `/opt/cvehub`。
-✅ `ls /opt/cvehub` 看得到 `docker-compose.yml`、`.env.example`、`cvehub/`。
+✅ `ls /opt/cvehub` 看得到 `docker-compose.yml`、`.env.example`、`cvehub/`、`scripts/`。
 
-### 步驟 3：建立 image
+### 步驟 3：準備基礎 image（主機不能 docker pull 時）
+在**一台能上網、有 Docker 的機器**（同樣是 x86_64）：
 ```bash
-cd /opt/cvehub
-sudo docker compose build
+docker pull python:3.12-slim
+docker save python:3.12-slim | gzip > python-3.12-slim.tar.gz
+sha256sum python-3.12-slim.tar.gz        # 記下來，帶進去後核對
 ```
-- 內網要從 Nexus 抓 Python 套件：`sudo PIP_INDEX_URL=https://<nexus>/repository/<pypi-proxy>/simple docker compose build`
-- 基礎 image 要從內部 registry 拿：加上 `--build-arg BASE_IMAGE=<registry>/python:3.12-slim`
+把檔案帶到 cvehub 主機的 `/tmp`，然後：
+```bash
+sha256sum /tmp/python-3.12-slim.tar.gz   # 和上面一致
+sudo docker load -i /tmp/python-3.12-slim.tar.gz
+```
+✅ `sudo docker image inspect python:3.12-slim >/dev/null && echo OK` 印出 `OK`。
+（公司內部 registry 有這個 image 時，也可以 load 那一份，並在 `.env` 的 `BASE_IMAGE=` 寫它的完整名稱，例如 `nexus.example.com:8443/python:3.12-slim`。）
 
-✅ `sudo docker images cvehub` 看得到 `cvehub:0.6.0`（約 190 MB）。
-
-### 步驟 4：準備設定檔與資料目錄
+### 步驟 4：準備設定檔與資料目錄，填建置設定
 ```bash
 cd /opt/cvehub
 sudo cp .env.example .env
 sudo chmod 600 .env
 sudo mkdir -p config data/inbox data/vex-inbox
 sudo chown -R 10001 data            # 容器內以 UID 10001 執行
+sudo nano .env                      # 先改最上面的「0. 建置」
 ```
-⚠️ `.env` 會放 Landscape 金鑰與密碼雜湊，**不要 commit、不要寄出**（`.gitignore` 已排除 `.env`、`data/`、`config/`）。
 
-### 步驟 5：跑自動化測試
+| 設定 | 填什麼 |
+|---|---|
+| `BASE_IMAGE` | 步驟 3 載入的 image 名稱（預設 `python:3.12-slim`） |
+| `PIP_INDEX_URL` | Nexus 的 PyPI proxy，例：`https://nexus.example.com/repository/pypi-proxy/simple` |
+| `PIP_TRUSTED_HOST` | Nexus 是自簽憑證時填它的主機名稱（例：`nexus.example.com`）；公開憑證留空 |
+| `BUILD_HTTP_PROXY` 等 | 建置時連 Nexus 要經過 proxy 才填，一般留空 |
+
+⚠️ `.env` 之後會放 Landscape 金鑰，**不要 commit、不要寄出**（`.gitignore` 已排除 `.env`、`data/`、`config/`）。
+
+### 步驟 5：建立 image
+```bash
+cd /opt/cvehub
+sudo docker compose build
+```
+過程中會看到 `Looking in indexes: <你的 Nexus>`，表示套件從 Nexus 安裝。
+✅ 最後是 `Built`；`sudo docker images cvehub` 看得到新版本（約 190 MB）。
+❌ `pull access denied`／`failed to resolve source metadata`：基礎 image 沒載入或名稱和 `BASE_IMAGE` 不同，回到步驟 3。
+❌ `Could not find a version that satisfies the requirement`／SSL 錯誤：檢查 `PIP_INDEX_URL`、`PIP_TRUSTED_HOST`，以及 Nexus 的 PyPI proxy 能不能抓到 `requirements.txt` 裡的套件。
+
+### 步驟 6：跑自動化測試
 ```bash
 sudo docker compose run --rm --no-deps cvehub python -m unittest discover -s tests -t . </dev/null
 ```
-✅ 最後一行是 `OK`（中間會印出幾段 `ValueError`，那是「錯誤檔案要被拒絕」的測試，正常）。
+✅ 最後一行是 `OK`（中間會印出幾段 `ValueError`、匯入紀錄，那是測試內容，正常）。
 
-### 步驟 6：在 Landscape 產生唯讀的 API 金鑰
+### 步驟 7：在 Landscape 產生唯讀的 API 金鑰
 見第 3 節：建一個只能檢視電腦的帳號，用它產生 API 金鑰（Settings → API credentials）。
 Landscape 是自簽憑證時，把 Landscape 伺服器上的 `/etc/ssl/certs/landscape_server_ca.crt` 複製到 `/opt/cvehub/config/`。
 ✅ `ls /opt/cvehub/config/landscape_server_ca.crt` 存在（使用公開憑證的 Landscape 可略過，並把 `.env` 的 `LANDSCAPE_CA_FILE=` 留空）。
 
-### 步驟 7：編輯 `.env`
-`sudo nano /opt/cvehub/.env`，至少要改這些（其他維持預設即可，每一項都有說明）：
+### 步驟 8：編輯 `.env`
+`sudo nano /opt/cvehub/.env`，除了步驟 4 的建置設定，至少還要改這些（其他維持預設即可，每一項都有說明）：
 
 | 設定 | 填什麼 |
 |---|---|
 | `LANDSCAPE_API_URI` | `https://<Landscape 主機名稱>/api/`（主機名稱要和憑證一致） |
-| `LANDSCAPE_API_KEY`、`LANDSCAPE_API_SECRET` | 步驟 6 產生的金鑰 |
+| `LANDSCAPE_API_KEY`、`LANDSCAPE_API_SECRET` | 步驟 7 產生的金鑰 |
 | `UBUNTU_RELEASES` | 主機有用到的版本，例如 `20.04,22.04,24.04` |
 | `KERNEL_API_URL` 等 | 有 kernel API 就依第 4 節填寫；**沒有就把 `KERNEL_API_URL=` 留空**（改用「最新安裝的 kernel」推測） |
 | `TZ` | 時區，例如 `Asia/Taipei` |
 | `SCHEDULE_SYNC` | 自動同步時間（cron 格式），預設每天 06:00、18:00 |
 
-### 步驟 8：建立第一個管理員帳號
+### 步驟 9：建立第一個管理員帳號
 ```bash
 cd /opt/cvehub
 sudo docker compose run --rm --no-deps cvehub python -m cvehub.cli user-add admin admin
@@ -89,10 +116,10 @@ sudo docker compose run --rm --no-deps cvehub python -m cvehub.cli user-add admi
 ✅ 印出「已新增 admin（管理）」；`sudo docker compose run --rm --no-deps cvehub python -m cvehub.cli user-list` 看得到這個帳號。
 其他人的帳號登入後在「帳號管理」頁建立（見第 5.1 節）。
 
-### 步驟 9：決定 HTTP 或 HTTPS
+### 步驟 10：決定 HTTP 或 HTTPS
 登入時密碼會經過網路傳送，**正式環境請用 HTTPS**（第 7 節：放在反向代理後面，或容器直接提供 HTTPS）。只在測試網段試用時可以先用 HTTP。
 
-### 步驟 10：啟動
+### 步驟 11：啟動
 ```bash
 cd /opt/cvehub
 sudo docker compose up -d
@@ -100,7 +127,7 @@ sudo docker compose logs --tail 20
 ```
 ✅ log 有「排程啟動」；`sudo docker compose ps` 狀態變成 `healthy`（約 1 分鐘）。
 
-### 步驟 11：匯入漏洞資料（OSV 與 VEX 兩份都要）
+### 步驟 12：匯入漏洞資料（OSV 與 VEX 兩份都要）
 1. 在能上網的機器下載兩個檔案：
    - `https://security-metadata.canonical.com/osv/osv-all.tar.xz`（約 50 MB）
    - `https://security-metadata.canonical.com/vex/vex-all.tar.xz`（約 80 MB）
@@ -119,8 +146,8 @@ sudo docker compose logs --tail 20
 
 ✅ 指令最後印出「同步完成：主機 N、…」，N 是 Landscape 裡的主機數。
 
-### 步驟 12：確認網頁
-1. 瀏覽器開 `http(s)://<主機>:8080/`，用步驟 8 建立的帳號登入。
+### 步驟 13：確認網頁
+1. 瀏覽器開 `http(s)://<主機>:8080/`，用步驟 9 建立的帳號登入。
 2. 逐頁確認：
    - 總覽：主機清單、每台的 CVE 數
    - 資料匯入：OSV、VEX 兩份最新一筆都是 `ok`、使用中＝是；VEX「無法辨識」是 0
@@ -132,7 +159,7 @@ sudo docker compose logs --tail 20
    ```
 ✅ 回 `"status":"ok"`、`"problems":[]`。
 
-### 步驟 13：接上日常維護
+### 步驟 14：接上日常維護
 - 漏洞資料每天或每週更新一次（兩份一起），見 `MAINTENANCE.md`
 - 把 `/healthz` 接到監控（第 8 節）
 - 定期備份 `data/cvehub.sqlite3`、`.env`、`config/`（第 10 節）
@@ -311,6 +338,7 @@ docker compose run --rm --no-deps cvehub python -m unittest discover -s tests -t
 cd /opt/cvehub
 sudo bash scripts/upgrade.sh /tmp/cvehub-0.6.0.zip
 ```
+腳本會先確認 `.env` 的 `BASE_IMAGE` 在本機；沒有的話試著 `docker pull`，主機不能連外而拉不到時就停下並提示（什麼都不會改）。
 腳本會顯示「目前版本 → 新版本」與更新說明，確認後依序：
 1. 備份程式與設定到 `backups/<時間>-<舊版本>/code.tgz`
 2. 替換程式檔（**`.env`、`data/`、`config/`、`docker-compose.override.yml` 不會動**）
@@ -327,7 +355,14 @@ mkdir /tmp/cvehub-new && cd /tmp/cvehub-new && python3 -m zipfile -e /tmp/cvehub
 sudo CVEHUB_DIR=/opt/cvehub bash /tmp/cvehub-new/*/scripts/upgrade.sh /tmp/cvehub-0.6.0.zip
 ```
 
-### 10.3 回復
+### 10.3 更新基礎 image（Python 安全更新，建議每季一次）
+照步驟 3 在能上網的機器重新 `docker pull python:3.12-slim` → `docker save`，帶進主機 `docker load`（同名會取代舊的），然後用目前版本的 zip 再跑一次更新腳本：
+```bash
+sudo bash /opt/cvehub/scripts/upgrade.sh /tmp/cvehub-main.zip
+```
+腳本會用新的基礎 image 重建、測試、再啟動；版本號不變也可以這樣做。
+
+### 10.4 回復
 ```bash
 cd /opt/cvehub
 ls backups/                                         # 找到更新前的備份，例：20261022-093000-0.5.1
@@ -335,9 +370,9 @@ sudo bash scripts/upgrade.sh --rollback backups/20261022-093000-0.5.1
 ```
 程式與資料庫都回到更新前（更新後的同步結果會在下次同步重新產生；`.env`、`config/` 不會被還原）。
 
-### 10.4 備份
+### 10.5 備份
 - 定期複製 `data/cvehub.sqlite3`（建議先 `docker compose stop`，或用 `sqlite3 ... ".backup"`）、`.env`、`config/` 到別台機器
-- `backups/` 每次更新會多一份（含資料庫），確認新版正常後可以刪掉舊的
+- `backups/` 每次更新會多一份（含資料庫），腳本自動只保留最近 5 份（`sudo CVEHUB_KEEP_BACKUPS=10 bash scripts/upgrade.sh …` 可改）
 
 ## 11. 限制
 

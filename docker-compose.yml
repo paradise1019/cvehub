@@ -2,10 +2,15 @@ services:
   cvehub:
     build:
       context: .
+      # 建置設定都寫在 .env 的「0. 建置」（docker compose 會自動讀同目錄的 .env）
       args:
-        # 內網改成 Nexus，例如 https://nexus.example.com/repository/pypi-proxy/simple
+        BASE_IMAGE: ${BASE_IMAGE:-python:3.12-slim}
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
-    image: cvehub:0.6.0
+        PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-}
+        HTTP_PROXY: ${BUILD_HTTP_PROXY:-}
+        HTTPS_PROXY: ${BUILD_HTTPS_PROXY:-}
+        NO_PROXY: ${BUILD_NO_PROXY:-}
+    image: cvehub:0.6.1
     env_file: .env
     ports:
       - "8080:8080"

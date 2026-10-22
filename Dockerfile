@@ -1,5 +1,6 @@
 # cvehub：Landscape × Canonical OSV 的 CVE 管理服務
-# 內網：PIP_INDEX_URL 指向 Nexus；基礎 image 可改成內部 registry 的路徑
+# 內網：.env 設 BASE_IMAGE（事先 docker load 進來的基礎 image）、PIP_INDEX_URL（Nexus）
+# 主機不能 docker pull 時：基礎 image 必須已在本機，建置不會去 registry 抓
 ARG BASE_IMAGE=python:3.12-slim
 FROM ${BASE_IMAGE}
 
@@ -9,7 +10,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" ${PIP_TRUSTED_HOST:+--trusted-host "$PIP_TRUSTED_HOST"} -r requirements.txt
+RUN pip install --no-cache-dir --disable-pip-version-check --index-url "${PIP_INDEX_URL}" \
+        ${PIP_TRUSTED_HOST:+--trusted-host "$PIP_TRUSTED_HOST"} -r requirements.txt
 
 COPY cvehub ./cvehub
 COPY tests ./tests

@@ -7,7 +7,7 @@
 | 每天或每週 | 更新漏洞資料（兩份一起） | 下載 `https://security-metadata.canonical.com/osv/osv-all.tar.xz` 與 `.../vex/vex-all.tar.xz`，放到 `data/inbox/`、`data/vex-inbox/` 或用網頁上傳 | 「資料匯入」頁兩份最新一筆都是 `ok`、使用中＝是；VEX「無法辨識」是 0；`/healthz` 沒有 `*_stale` |
 | 每天 | 看健康狀態 | 監控 `/healthz` 是否 200 | 503 時依 README 第 8 節處理 |
 | 每月 | 抽查 Landscape 套件清單是否完整 | 挑 2–3 台主機，用 `ubuntu_cve_report.py --dpkg` 跑一次，和 cvehub 的結果比較 | CVE 清單相同 |
-| 每季 | 重建 image（取得 Python、套件的安全更新） | `docker compose build --pull && docker compose run --rm --no-deps cvehub python -m unittest discover -s tests -t . </dev/null && docker compose up -d` | 測試 `OK`；網頁正常；`/healthz` 200 |
+| 每季 | 重建 image（取得 Python、套件的安全更新） | 在能上網的機器重新存一份基礎 image 帶進來 `docker load`，再用目前版本的 zip 跑 `scripts/upgrade.sh`（README 10.3） | 腳本最後「已更新」；網頁正常；`/healthz` 200 |
 | 每季 | 備份 | 複製 `data/cvehub.sqlite3`（建議先 `docker compose stop`，或用 `sqlite3 ... ".backup"`）、`.env`、`config/` 到別台機器 | 備份檔能用 sqlite3 開啟 |
 | 每季 | 檢查例外 | 「例外」頁看有沒有快到期或已過期的項目 | 過期的例外處理掉或延長 |
 | 每季 | 檢查帳號 | 「帳號管理」頁：離職或調動的人停用、看稽核紀錄有沒有異常登入失敗 | 只剩需要的帳號 |
@@ -38,15 +38,16 @@
 - 「某版本的資料筆數不足」：先確認 `UBUNTU_RELEASES` 沒設錯；沒設錯的話，可能是 Canonical 改了 OSV 的版本名稱（例如 `Ubuntu:24.04:LTS`），要調整 `cvehub/osv_import.py` 的 `wanted_ecosystems()`
 
 ### Python 版本到期（3.12 於 2028-10 停止支援）
-1. `docker compose build --build-arg BASE_IMAGE=python:3.13-slim`（或內部 registry 的對應 image）
-2. 跑測試 → `OK` 再上線
+1. 照 README 步驟 3 準備並載入 `python:3.13-slim`
+2. `.env` 改 `BASE_IMAGE=python:3.13-slim`
+3. 用目前版本的 zip 跑 `scripts/upgrade.sh`（會重建、跑測試，失敗自動還原）
 
 ### 升級 cvehub 本身
 1. 下載新版 zip，先看 `CHANGELOG.md` 的「升級注意」
 2. `sudo bash scripts/upgrade.sh <新版 zip>`（README 第 10 節；自動備份、測試、失敗還原）
 3. 腳本若列出「.env 沒有的新設定」：依 `.env.example` 的說明決定要不要補進 `.env`（不補就用預設值），補完 `docker compose up -d`
 4. 確認網頁右上角版本與 `/healthz` 正常；有問題 `--rollback`
-5. 新版正常一段時間後，刪掉 `backups/` 裡舊的備份
+5. `backups/` 由腳本自動只保留最近 5 份
 
 ## 已知限制（處理前請先確認）
 - Landscape 的套件資料有延遲（最慢約 45 分鐘）

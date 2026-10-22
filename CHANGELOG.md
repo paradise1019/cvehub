@@ -2,6 +2,11 @@
 
 更新方式見 README「10. 更新與回復」：`sudo bash scripts/upgrade.sh <新版 zip>`。
 
+## 0.6.1
+**升級注意**
+- 建置設定移到 `.env` 最上面的「0. 建置」：`BASE_IMAGE`、`PIP_INDEX_URL`、`PIP_TRUSTED_HOST`、`BUILD_HTTP_PROXY` 等。原本用環境變數帶 `PIP_INDEX_URL` 的，請改寫進 `.env`。
+- 主機不能 `docker pull` 時，基礎 image 要先 `docker load` 進來（README 步驟 3）；更新腳本會先檢查，沒有就停下、不改任何東西。
+
 ## 0.6.0
 **升級注意**
 - 登入改成網頁登入頁＋多帳號。第一次啟動時，`.env` 原本的 `WEB_AUTH_USER`／`WEB_AUTH_PASSWORD_HASH` 會自動轉成第一個「管理」帳號，**原本的帳號密碼照樣可以登入**。
