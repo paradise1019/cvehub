@@ -33,8 +33,12 @@ STATUSES = [
     ("vulnerable-wip", "Vulnerable, work in progress", "修正中", "受影響，官方正在修正"),
     ("deferred", "Vulnerable, fix deferred", "延後修正", "受影響，官方延後修正"),
     ("ignored", "Ignored", "不修正", "官方不修正（不再支援、已撤回或修正會破壞其他功能）"),
+    # 只用在輸出報表（截至期末）：修正的 USN 在報表期末之後才發布
+    ("fixed-after", "Fixed after period end", "期末後修正", "報表期末時還沒有修正，期末之後才釋出修正（依 USN 發布日）"),
     ("unknown", "Unknown", "無法辨識", "VEX 說明文字無法辨識（見資料匯入頁）"),
-    ("fixed", "Fixed", "已修正", "已有修正版本"),
+    # 只用在輸出報表：有修正版本但沒有對應的 USN，無法判斷修正日期
+    ("fixed-nodate", "Fixed (date unknown)", "已修正（日期不明）", "有修正版本，但沒有對應的 USN，無法確認是否在期末前修正"),
+    ("fixed", "Fixed", "已修正", "已有修正版本（報表中：期末前已發布）"),
     ("not-affected", "Not affected", "不受影響", "相關但不受影響"),
     ("not-in-release", "Not in release", "版本無此套件", "這個版本沒有這個套件"),
     ("none", "—", "無紀錄", "官方資料沒有這個套件／版本的紀錄"),

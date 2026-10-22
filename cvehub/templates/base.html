@@ -50,6 +50,7 @@
 {% if job.message %}<div class="card {% if '失敗' in job.message %}err{% endif %}">{{ job.message }}</div>{% endif %}
 {% if not osv %}<div class="card err">尚未匯入 OSV 資料：到「資料匯入」頁上傳 osv-all.tar.xz。</div>
 {% elif osv_stale %}<div class="card warn">OSV 資料檔日期 {{ osv.file_mtime }}，已超過 {{ cfg.OSV_STALE_WARN_DAYS }} 天，請更新。</div>{% endif %}
+{% if osv_outdated %}<div class="card warn">程式已更新，OSV 資料需要用新格式重新匯入一次（自動進行，約 5 分鐘；也可以按「立即同步」）。完成前輸出報表的修正日期不完整。</div>{% endif %}
 {% if osv and not vex %}<div class="card warn">尚未匯入 VEX（官方狀態）：輸出報表只能分「已修正／受影響」。到「資料匯入」頁上傳 vex-all.tar.xz。</div>
 {% elif vex and vex_stale %}<div class="card warn">VEX 資料檔日期 {{ vex.file_mtime }}，已超過 {{ cfg.OSV_STALE_WARN_DAYS }} 天，請更新。</div>
 {% elif data_gap > 2 %}<div class="card warn">OSV（{{ osv.file_mtime[:10] }}）與 VEX（{{ vex.file_mtime[:10] }}）資料日期相差 {{ data_gap }} 天，兩份請一起更新。</div>{% endif %}

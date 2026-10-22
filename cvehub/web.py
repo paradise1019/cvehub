@@ -153,6 +153,7 @@ def create_app(start_scheduler=True):
         imp = osv_import.active_import(g.con) if "con" in g else None
         vex = vex_import.active_import(g.con) if "con" in g else None
         return {"osv": imp, "osv_stale": _age_days(imp) >= Config.OSV_STALE_WARN_DAYS, "vex": vex,
+                "osv_outdated": osv_import.outdated(g.con) if "con" in g else False,
                 "vex_stale": _age_days(vex) >= Config.OSV_STALE_WARN_DAYS,
                 "data_gap": abs(_age_days(imp) - _age_days(vex)) if imp and vex else 0,
                 "job": _status, "version": __version__, "PRIO": PRIO, "cfg": Config,

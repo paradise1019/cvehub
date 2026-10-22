@@ -60,11 +60,23 @@ def osv_record(cve, affected, priority="high", withdrawn=None, details=None):
     return d
 
 
-def make_osv_tar(path, records, extra_files=None):
+def usn_record(usn, published, cves, affected):
+    """affected: [(ecosystem, source, fixed)]"""
+    return {"id": usn, "published": published + "T00:00:00Z", "upstream": ["UBUNTU-" + c for c in cves],
+            "affected": [{"package": {"ecosystem": e, "name": s}, "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": f}]}]}
+                         for e, s, f in affected]}
+
+
+def make_osv_tar(path, records, extra_files=None, usns=()):
     with tarfile.open(path, "w:xz") as t:
         for r in records:
             data = json.dumps(r).encode()
             ti = tarfile.TarInfo("osv/cve/2026/%s.json" % r["id"])
+            ti.size = len(data)
+            t.addfile(ti, io.BytesIO(data))
+        for u in usns:
+            data = json.dumps(u).encode()
+            ti = tarfile.TarInfo("osv/usn/%s.json" % u["id"])
             ti.size = len(data)
             t.addfile(ti, io.BytesIO(data))
         for name, data in (extra_files or {}).items():

@@ -11,13 +11,22 @@ log = logging.getLogger(__name__)
 _sched = None
 
 
+_reimport_tried = False
+
+
 def _osv_check():
+    global _reimport_tried
     from .web import run_job
     con = db.connect()
     try:
         import glob, os
-        if glob.glob(os.path.join(Config.OSV_INBOX_DIR, "*.tar.xz")) or glob.glob(os.path.join(Config.VEX_INBOX_DIR, "*.tar.xz")):
-            run_job("sync")          # sync 會先匯入新檔
+        from . import osv_import
+        # 升級後的舊格式資料：啟動後自動用保存檔重新匯入一次（保存檔不見了就不重試，畫面上會一直提醒）
+        reimport = not _reimport_tried and osv_import.outdated(con)
+        if (glob.glob(os.path.join(Config.OSV_INBOX_DIR, "*.tar.xz")) or glob.glob(os.path.join(Config.VEX_INBOX_DIR, "*.tar.xz"))
+                or reimport):
+            if run_job("sync") and reimport:   # sync 會先匯入新檔、重匯舊格式
+                _reimport_tried = True
     finally:
         con.close()
 

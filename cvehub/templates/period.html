@@ -9,13 +9,14 @@
  最低等級 <select name="min_priority">{% for lv in levels %}<option {% if f.min_priority==lv %}selected{% endif %}>{{ lv }}</option>{% endfor %}</select>
  明細狀態 <select name="status">{% for k, v in status_filters %}<option value="{{ k }}" {% if f.status==k %}selected{% endif %}>{{ v }}</option>{% endfor %}</select>
  {% if sort_key %}<input type="hidden" name="sort" value="{{ sort_key }}"><input type="hidden" name="dir" value="{{ sort_dir }}">{% endif %}
- <button>查詢</button> <a href="{{ export_url }}">下載 Excel</a>
+ <button>查詢</button> <a href="{{ export_url }}">下載 Excel</a> <span class="muted">（一季的資料約需 10–20 秒產生，請稍候）</span>
  <div style="margin-top:.4rem">快速選擇：{% for name, a, b in quarters[:6] %}<a href="{{ url_for('period_report', **dict(f, **{'from': a, 'to': b})) }}">{{ name }}</a>{% if not loop.last %}・{% endif %}{% endfor %}</div>
 </form>
 <details class="card"><summary><b>狀態說明</b></summary>
 <table style="width:auto;margin-top:.5rem"><tr><th>狀態</th><th>說明</th><th>Ubuntu 官方名稱</th></tr>
 {% for code, en, zh, desc in statuses %}<tr><td class="s-{{ code }} nowrap">{{ zh }}</td><td>{{ desc }}</td><td class="muted">{{ en }}</td></tr>{% endfor %}</table>
-<p class="muted">20.04 標準支援已結束，以 Ubuntu Pro（ESM）為準；22.04／24.04 以一般套件庫為準，只有 Pro 才修正時標「（Pro）」。修正版本是第一個修正的版本。
+<p class="muted"><b>「已修正」以報表期末日判斷</b>：修正它的 USN 在期末前發布才算；期末之後才發布的列為「期末後修正」，沒有 USN 的列為「已修正（日期不明）」，同一份報表任何時候產生結果都一樣。
+其他狀態（待評估、延後修正…）是官方目前的狀態，官方沒有提供歷史紀錄。<br>20.04 標準支援已結束，以 Ubuntu Pro（ESM）為準；22.04／24.04 以一般套件庫為準，只有 Pro 才修正時標「（Pro）」。修正版本是第一個修正的版本。
 kernel 只列 linux、各版本最新的 HWE 與主機上有裝的 HWE（雲端／OEM 變體不列）。
 {% if not have_vex %}<b>尚未匯入 VEX：狀態只分「已修正／受影響」。</b>{% endif %}</p></details>
 
@@ -28,6 +29,17 @@ kernel 只列 linux、各版本最新的 HWE 與主機上有裝的 HWE（雲端�
 {% for c in summary.statuses %}<td class="n">{% if s[col][c] %}<a href="{{ url_for('period_report', **dict(f, status=c)) }}">{{ s[col][c] }}</a>{% else %}<span class="muted">0</span>{% endif %}</td>{% endfor %}</tr>
 {% endfor %}{% endfor %}
 <tr><th colspan="2">合計 CVE</th><th class="cnt">{{ summary.total }}</th><td colspan="{{ summary.statuses|length }}" class="muted">其中 kernel {{ summary.total_kernel }}</td></tr></table>
+
+<h3>Kernel 修補版本（截至 {{ f.to }}） <span class="muted">（給風險評鑑單用；只算期末前已發布的修正，取最高的修正版本）</span></h3>
+{% if summary.kernel %}<table><tr><th>Ubuntu</th><th>kernel 系列</th><th class="num">弱點數</th><th class="num">期末前已修正</th><th>升級到</th><th>最高者（CVE／USN／發布日）</th>
+<th class="num">期末仍未修正</th><th class="num">日期不明</th><th>評鑑單文字</th></tr>
+{% for k in summary.kernel %}<tr><td class="nowrap">{{ k.release }}</td><td class="nowrap">{{ k.series }}</td><td class="num">{{ k.total }}</td><td class="num">{{ k.fixed_n }}</td>
+<td class="nowrap"><b>{{ k.upgrade_to or '—' }}</b></td>
+<td class="nowrap">{% if k.top_cve %}<a href="{{ url_for('cve', cve=k.top_cve) }}">{{ k.top_cve }}</a><br><span class="muted">{{ k.top_usn }}，{{ k.top_date }}{% if k.top_same > 1 %}；同版本共 {{ k.top_same }} 個{% endif %}</span>{% endif %}</td>
+<td class="num">{{ k.open_n }}{% if k.later_n %}<br><span class="muted">期末後修正 {{ k.later_n }}</span>{% endif %}</td><td class="num">{{ k.nodate_n }}</td>
+<td style="font-size:.85rem">{{ k.sentence }}</td></tr>{% endfor %}
+</table><p class="muted">完整的 kernel CVE 清單（期末狀態、修正版本、USN、發布日）在 Excel 的「Kernel 明細」頁。</p>
+{% else %}<p class="muted">這個區間沒有 kernel 弱點。</p>{% endif %}
 
 <h3>明細 <span class="muted">（共 {{ total_rows }} 列{% if f.status %}，篩選：{{ dict(status_filters)[f.status] }}{% endif %}）</span></h3>
 {% set pargs = dict(f, **sort_args) %}

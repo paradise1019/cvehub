@@ -3,7 +3,7 @@ import os
 import unittest
 
 from cvehub import osv_import, period, vex_import
-from tests.helpers import TempEnv, make_osv_tar, make_vex_tar, osv_record
+from tests.helpers import TempEnv, make_osv_tar, make_vex_tar, osv_record, usn_record
 
 E20P, E22, E22P, E24 = "Ubuntu:Pro:20.04:LTS", "Ubuntu:22.04:LTS", "Ubuntu:Pro:22.04:LTS", "Ubuntu:24.04:LTS"
 
@@ -39,6 +39,16 @@ RECS = [
     rec("CVE-2026-1007", [("Ubuntu:26.04:LTS", "zlib", "1:1.3", {})], "medium", "2026-09-01T00:00:00Z"),
 ]
 
+USNS = [
+    usn_record("USN-1", "2026-09-01", ["CVE-2026-1001"], [(E20P, "openssl", "1.1.1f-1ubuntu2.24+esm1"), (E22, "openssl", "3.0.2-0ubuntu1.20"),
+                                                      (E24, "openssl", "3.0.13-0ubuntu3.16")]),
+    usn_record("USN-2", "2026-10-05", ["CVE-2026-1002"], [(E22, "linux", "5.15.0-160.170"), (E22, "linux-aws", "5.15.0-1090.97")]),  # 期末後
+    usn_record("USN-3", "2026-08-10", ["CVE-2026-1002"], [(E22, "linux-hwe-6.8", "6.8.0-90.91~22.04.1")]),
+    usn_record("USN-4", "2026-09-20", ["CVE-2026-1006"], [(E22, "linux-hwe-6.8", "6.8.0-91.92~22.04.1")]),
+    usn_record("USN-4b", "2026-09-25", ["CVE-2026-1006"], [(E22, "linux-hwe-6.8", "6.8.0-91.92~22.04.1")]),       # 較晚的重複 USN
+    usn_record("USN-5", "2026-09-29", ["CVE-2026-1003"], [(E22P, "nodejs", "12.22.9~dfsg-1ubuntu3.6+esm1")]),
+]   # linux-firmware（24.04）沒有 USN → 日期不明
+
 VEX = {
     "CVE-2026-1001": [("fixed", [("openssl", "esm-infra/focal"), ("openssl", "jammy"), ("openssl", "noble")]),
                       ("eol", [("openssl", "focal")]),
@@ -56,7 +66,7 @@ VEX = {
 class PeriodTest(unittest.TestCase):
     def setUp(self):
         self.env = TempEnv(UBUNTU_RELEASES=["20.04", "22.04", "24.04"]).__enter__()
-        osv_import.import_file(self.env.con, make_osv_tar(os.path.join(self.env.dir.name, "o.tar.xz"), RECS))
+        osv_import.import_file(self.env.con, make_osv_tar(os.path.join(self.env.dir.name, "o.tar.xz"), RECS, usns=USNS))
         c = self.env.con
         c.execute("INSERT INTO host(id, hostname, release, active) VALUES (1, 'web01', '24.04', 1)")
         c.execute("INSERT INTO host_package VALUES (1, 'libssl3t64', '3.0.13-0ubuntu3')")
@@ -68,8 +78,8 @@ class PeriodTest(unittest.TestCase):
     def with_vex(self):
         vex_import.import_file(self.env.con, make_vex_tar(os.path.join(self.env.dir.name, "v.tar.xz"), VEX))
 
-    def rows(self, minp="medium", status="", have_vex=True):
-        rows, summary = period.build(self.env.con, "2026-07-01", "2026-09-30", minp, status, have_vex=have_vex)
+    def rows(self, minp="medium", status="", have_vex=True, to="2026-09-30"):
+        rows, summary = period.build(self.env.con, "2026-07-01", to, minp, status, have_vex=have_vex)
         return {(r["cve_id"], r["package"]): r for r in rows}, summary
 
     def test_osv_only(self):
@@ -82,6 +92,48 @@ class PeriodTest(unittest.TestCase):
         self.assertEqual(rows[("CVE-2026-1003", "nodejs")]["ubuntu22"], "已修正（Pro） 12.22.9~dfsg-1ubuntu3.6+esm1")
         self.assertEqual(rows[("CVE-2026-1003", "nodejs")]["codes"]["ubuntu24"], "none")
         self.assertEqual(rows[("CVE-2026-1002", "linux")]["codes"]["ubuntu24"], "vulnerable")
+        self.assertEqual(rows[("CVE-2026-1002", "linux")]["ubuntu22"], "期末後修正（2026-10-05）")
+
+    def test_as_of_period_end(self):
+        self.with_vex()
+        rows, _ = self.rows()
+        self.assertEqual(rows[("CVE-2026-1002", "linux")]["codes"]["ubuntu22"], "fixed-after")           # USN 在 10/5
+        self.assertEqual(rows[("CVE-2026-1002", "linux-hwe-6.8")]["codes"]["ubuntu22"], "fixed")          # USN 在 8/10
+        self.assertEqual(rows[("CVE-2026-1002", "linux-firmware")]["codes"]["ubuntu24"], "fixed-nodate")  # 沒有 USN
+        self.assertEqual(rows[("CVE-2026-1003", "nodejs")]["codes"]["ubuntu22"], "fixed")                 # Pro 的 USN
+        rows, summary = self.rows(status="open")
+        self.assertIn(("CVE-2026-1002", "linux"), rows)                                                   # 期末未解決包含期末後修正
+        self.assertIn("fixed-after", summary["statuses"])
+        rows, _ = self.rows(to="2026-10-31")                                                              # 區間拉長就算已修正
+        self.assertEqual(rows[("CVE-2026-1002", "linux")]["codes"]["ubuntu22"], "fixed")
+
+    def test_kernel_summary(self):
+        self.with_vex()
+        _, summary = self.rows()
+        k = {(x["release"], x["series"]): x for x in summary["kernel"]}
+        h = k[("22.04", "linux-hwe-6.8")]
+        self.assertEqual((h["total"], h["fixed_n"], h["upgrade_to"], h["top_cve"], h["top_usn"], h["top_date"]),
+                         (2, 2, "6.8.0-91.92~22.04.1", "CVE-2026-1006", "USN-4", "2026-09-20"))     # 取最高版本、最早的 USN
+        self.assertIn("升級到 6.8.0-91.92~22.04.1 即可修補這 2 個", h["sentence"])
+        # 同一個最高版本有好幾個 CVE：固定取 USN 最早、再取 CVE 編號最小
+        tie = [{"cve_id": c, "priority": "high", "package": "linux", "published": "2026-07-01",
+                "codes": {"ubuntu20": "none", "ubuntu22": "fixed", "ubuntu24": "none"},
+                "fix": {"ubuntu22": ("5.15.0-200.210", u, d)}} for c, u, d in
+               (("CVE-2026-9003", "USN-9", "2026-09-10"), ("CVE-2026-9001", "USN-8", "2026-09-12"), ("CVE-2026-9002", "USN-7", "2026-09-10"))]
+        t = period.kernel_summary(tie, "2026-07-01", "2026-09-30")[0][0]
+        self.assertEqual((t["top_cve"], t["top_usn"], t["top_same"]), ("CVE-2026-9002", "USN-7", 3))
+        self.assertIn("同一版本修正的共 3 個", t["sentence"])
+        g = k[("22.04", "linux")]
+        self.assertEqual((g["fixed_n"], g["open_n"], g["later_n"], g["upgrade_to"]), (0, 1, 1, ""))
+        self.assertIn("尚無已發布的修正", g["sentence"])
+        self.assertIn("其中 1 個於期末後才修正", g["sentence"])
+        self.assertEqual(k[("24.04", "linux")]["open_n"], 1)                                            # 修正中
+        self.assertNotIn(("22.04", "linux-aws"), k)                                                      # 雲端變體不列
+        self.assertNotIn(("24.04", "linux-firmware"), k)                                                 # 不是 kernel
+        _, later = self.rows(to="2026-10-31")
+        g2 = {(x["release"], x["series"]): x for x in later["kernel"]}[("22.04", "linux")]
+        self.assertEqual((g2["fixed_n"], g2["upgrade_to"]), (1, "5.15.0-160.170"))
+        self.assertTrue(any(d["cve"] == "CVE-2026-1002" and d["usn"] == "USN-2" for d in later["kernel_detail"]))
 
     def test_vex_statuses(self):
         self.with_vex()
@@ -147,7 +199,9 @@ class PeriodTest(unittest.TestCase):
         self.with_vex()
         rows, summary = period.build(self.env.con, "2026-07-01", "2026-09-30", "medium")
         wb = load_workbook(io.BytesIO(period.to_xlsx(rows, summary, "2026-07-01", "2026-09-30", "medium", vex_date="2026-10-21")))
-        self.assertEqual(wb.sheetnames, ["統計", "狀態說明", "明細"])
+        self.assertEqual(wb.sheetnames, ["統計", "Kernel 修補版本", "Kernel 明細", "狀態說明", "明細"])
+        kn = [[c.value for c in r] for r in wb["Kernel 修補版本"].iter_rows(min_row=3)]
+        self.assertTrue(any(r[1] == "linux-hwe-6.8" and r[5] == "6.8.0-91.92~22.04.1" for r in kn))
         head = [c.value for c in wb["明細"][1]]
         self.assertEqual(head, ["CVE", "等級", "公開日期", "套件", "Ubuntu 20.04", "Ubuntu 22.04", "Ubuntu 24.04", "說明"])
         self.assertEqual(wb["明細"].max_row, len(rows) + 1)

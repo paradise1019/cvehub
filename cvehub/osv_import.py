@@ -32,16 +32,38 @@ def wanted_ecosystems(releases):
     return eco
 
 
+def _kernel_variant(src):
+    """雲端／OEM kernel 變體（linux-aws、linux-azure…）：USN 修正日期不收（資料量大，報表也不列）"""
+    return src.startswith("linux-") and not src.startswith("linux-hwe-") and src != "linux-firmware"
+
+
+def _usn_rows(d, wanted):
+    """USN：哪一天、以哪個版本修正了哪些 CVE（輸出報表「截至期末」判斷用）"""
+    cves = [u.replace("UBUNTU-", "") for u in d.get("upstream", []) if "CVE-" in u]
+    for a in d.get("affected", []):
+        eco, src = a["package"]["ecosystem"], a["package"]["name"]
+        if eco not in wanted or _kernel_variant(src):
+            continue
+        fixed = next((ev["fixed"] for rng in a.get("ranges", []) for ev in rng.get("events", []) if "fixed" in ev), None)
+        if fixed:
+            for cve in cves:
+                yield (cve, eco, src, fixed, d["id"], d.get("published", "")[:10])
+
+
 def iter_osv(path, releases):
-    """逐筆產生 ("vuln", row) / ("affected", row) / ("binmap", row)；只保留需要的 Ubuntu 版本。記憶體用量固定"""
+    """逐筆產生 ("vuln"|"affected"|"binmap"|"usn", row)；只保留需要的 Ubuntu 版本。記憶體用量固定"""
     wanted = wanted_ecosystems(releases)
     with tarfile.open(path, "r:xz") as tar:
         for m in tar:
-            # 只讀一般檔案、只認 osv/cve/ 底下的 .json；不寫入磁碟
-            if not (m.isfile() and m.name.startswith("osv/cve/") and m.name.endswith(".json")):
+            # 只讀一般檔案、只認 osv/cve/、osv/usn/ 底下的 .json；不寫入磁碟
+            if not (m.isfile() and m.name.endswith(".json") and m.name.startswith(("osv/cve/", "osv/usn/"))):
                 continue
             d = json.load(tar.extractfile(m))
             if d.get("withdrawn"):
+                continue
+            if m.name.startswith("osv/usn/"):
+                for row in _usn_rows(d, wanted):
+                    yield "usn", row
                 continue
             cves = d.get("upstream") or [d["id"].replace("UBUNTU-", "")]
             prio = next((s["score"] for s in d.get("severity", []) if s.get("type") == "Ubuntu"), "")
@@ -75,11 +97,12 @@ def iter_osv(path, releases):
 
 SQL = {"vuln": "INSERT OR REPLACE INTO vuln(cve,priority,cvss,published,details) VALUES (?,?,?,?,?)",
        "affected": "INSERT INTO affected(ecosystem,source,cve,fixed,introduced,binaries) VALUES (?,?,?,?,?,?)",
-       "binmap": "INSERT OR IGNORE INTO binmap(ecosystem,binary,source) VALUES (?,?,?)"}
+       "binmap": "INSERT OR IGNORE INTO binmap(ecosystem,binary,source) VALUES (?,?,?)",
+       "usn": "INSERT OR REPLACE INTO usn_fix(cve,ecosystem,source,fixed,usn,published) VALUES (?,?,?,?,?,?)"}
 BATCH = 50000
 # 資料格式版本：匯入內容有變時加一，舊資料庫會用保存的 OSV 檔自動重匯
-# 1＝0.4.0 加 details；2＝0.5.0 收錄所有 CVE（含沒有指定版本套件的）
-FORMAT = 2
+# 1＝0.4.0 加 details；2＝0.5.0 收錄所有 CVE（含沒有指定版本套件的）；3＝0.7.0 加 USN 修正日期
+FORMAT = 3
 
 
 def import_file(con, path):
@@ -89,14 +112,21 @@ def import_file(con, path):
     releases = Config.UBUNTU_RELEASES
     log.info("OSV 匯入開始：%s（sha256 %s…，版本 %s）", path, sha[:12], ",".join(releases))
     try:
-        counts = {"vuln": 0, "affected": 0, "binmap": 0}
+        counts = {"vuln": 0, "affected": 0, "binmap": 0, "usn": 0}
         buf = {k: [] for k in SQL}
+        first_fix = {}       # (cve, ecosystem, source) -> 最早的 USN（同一個 CVE 常被好幾個 USN 列到）
         with con:  # 單一交易：失敗會整批回復
             con.execute("DELETE FROM affected")
             con.execute("DELETE FROM vuln")
             con.execute("DELETE FROM binmap")
+            con.execute("DELETE FROM usn_fix")
             per_release = {r: 0 for r in releases}
             for kind, row in iter_osv(path, releases):
+                if kind == "usn":
+                    k = row[:3]
+                    if k not in first_fix or (row[5], row[4]) < (first_fix[k][5], first_fix[k][4]):
+                        first_fix[k] = row
+                    continue
                 if kind == "affected":
                     rel = row[0].split(":")[-2] if row[0].endswith(":LTS") else row[0].split(":")[-1]
                     if rel in per_release and ":Pro:" not in row[0]:
@@ -106,6 +136,7 @@ def import_file(con, path):
                     con.executemany(SQL[kind], buf[kind])
                     counts[kind] += len(buf[kind])
                     buf[kind].clear()
+            buf["usn"] = list(first_fix.values())
             for kind, rows in buf.items():
                 if rows:
                     con.executemany(SQL[kind], rows)
@@ -125,7 +156,7 @@ def import_file(con, path):
                 (os.path.basename(path), sha, mtime, _now(), ",".join(releases), ncve, counts["affected"],
                  json.dumps(per_release, sort_keys=True), FORMAT))
         con.execute("VACUUM")          # 釋放舊資料佔用的空間
-        log.info("OSV 匯入完成：CVE %d、affected %d", ncve, counts["affected"])
+        log.info("OSV 匯入完成：CVE %d、affected %d、USN 修正紀錄 %d", ncve, counts["affected"], counts["usn"])
         return cur.lastrowid
     except Exception as e:
         with con:
@@ -133,6 +164,12 @@ def import_file(con, path):
                         " VALUES (?,?,?,?,?,'failed',?)", (os.path.basename(path), sha, mtime, _now(), ",".join(releases), str(e)[:500]))
         log.exception("OSV 匯入失敗：%s", path)
         raise
+
+
+def outdated(con):
+    """使用中的 OSV 資料是舊格式（升級後要重新匯入一次）"""
+    imp = active_import(con)
+    return bool(imp) and (imp["format"] or 0) < FORMAT
 
 
 def reimport_if_outdated(con):

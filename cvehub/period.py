@@ -11,11 +11,16 @@
 - 統計：一個 CVE 在某版本有多個套件時，取最需要注意的狀態（vex_import.STATUSES 的順序）
 """
 import datetime
+import functools
 import io
 
 from .config import PRIO
 from .sync import KERNEL_ABI, _kernel_source_by_series
+from .vercmp import vercmp
 from .vex_import import LABEL, LABEL_EN, RANK, STATUSES, UNRESOLVED, status_for
+
+# 報表期末時尚未修正（含期末後才修正的）
+OPEN_AT_END = tuple(UNRESOLVED) + ("fixed-after",)
 
 RELEASES = [("ubuntu20", "20.04"), ("ubuntu22", "22.04"), ("ubuntu24", "24.04")]
 COLUMNS = ["cve_id", "priority", "published", "package", "ubuntu20", "ubuntu22", "ubuntu24", "description"]
@@ -23,11 +28,11 @@ HEADERS = {"cve_id": "CVE", "priority": "等級", "published": "公開日期", "
            "ubuntu20": "Ubuntu 20.04", "ubuntu22": "Ubuntu 22.04", "ubuntu24": "Ubuntu 24.04", "description": "說明"}
 LEVELS = ["critical", "high", "medium", "low", "negligible"]
 DESC_MAX = 1000                  # kernel CVE 的說明常是整段 commit message
-STATUS_FILTERS = [("", "全部"), ("open", "未解決（待評估／受影響／修正中／延後修正／不修正）")] + \
+STATUS_FILTERS = [("", "全部"), ("open", "期末未解決（待評估／受影響／修正中／延後修正／不修正／期末後修正）")] + \
                  [(c, zh) for c, _, zh, _ in STATUSES if c != "unknown"]
 FILLS = {"needs-evaluation": "FFB3AD", "vulnerable": "FFD8A8", "vulnerable-wip": "FFE8A3", "deferred": "FFF1B8",
-         "ignored": "E1E4E8", "unknown": "E1E4E8", "fixed": "D3F9D8", "not-affected": "F6F8FA", "not-in-release": "F6F8FA",
-         "none": "FFFFFF"}
+         "ignored": "E1E4E8", "fixed-after": "FFD8A8", "unknown": "E1E4E8", "fixed-nodate": "E6F4EA", "fixed": "D3F9D8",
+         "not-affected": "F6F8FA", "not-in-release": "F6F8FA", "none": "FFFFFF"}
 PRIO_FILLS = {"critical": "CF222E", "high": "FB8500", "medium": "FFF1B8", "low": "DDF4FF", "negligible": "EEEEEE"}
 
 
@@ -96,14 +101,38 @@ def host_sources(con):
     return out
 
 
-def cell_text(code, pro, fixed, release):
+def cell_text(code, pro, fixed, release, fix_date=""):
+    if code == "fixed-after":
+        return "期末後修正（%s）" % fix_date
     t = "—" if code == "none" else LABEL.get(code, code)
-    if code == "fixed":
+    if code in ("fixed", "fixed-nodate"):
         if pro and release != "20.04":
             t += "（Pro）"
         if fixed:
             t += " " + fixed
     return t
+
+
+def usn_fixes(con, cves):
+    """{(cve, ecosystem, source): (修正版本, USN, 發布日)}：每個 CVE 第一次被修正的 USN"""
+    out = {}
+    for i in range(0, len(cves), 500):
+        chunk = cves[i:i + 500]
+        for r in con.execute("SELECT * FROM usn_fix WHERE cve IN (%s)" % ",".join("?" * len(chunk)), chunk):
+            out[(r["cve"], r["ecosystem"], r["source"])] = (r["fixed"], r["usn"], r["published"])
+    return out
+
+
+def as_of(code, pro, fx, cve, src, rel, usn, date_to):
+    """「已修正」改以報表期末判斷：USN 在期末之後＝期末後修正；沒有 USN＝日期不明。回傳 (代碼, 修正資訊)"""
+    if code != "fixed":
+        return code, None
+    u = usn.get((cve, ("Ubuntu:Pro:%s:LTS" if pro else "Ubuntu:%s:LTS") % rel, src))
+    if not u:
+        return "fixed-nodate", (fx, "", "")
+    if u[2] > date_to:
+        return "fixed-after", (fx or u[0], u[1], u[2])
+    return "fixed", (fx or u[0], u[1], u[2])
 
 
 def osv_fixed(con, cves, releases):
@@ -161,6 +190,7 @@ def build(con, date_from, date_to, min_priority="medium", status_filter="", have
                 ",".join("?" * len(chunk)), ",".join("?" * len(rels)))
             for r in con.execute(q, chunk + rels):
                 vex[(r["cve"], r["source"], r["release"])] = r
+    usn = usn_fixes(con, cves)
     keys = {(c, s) for (c, s, _) in fixed} | {(c, s) for (c, s, _) in vex}
     keep_hwe = set(latest_hwe(con).values()) | {s for _, srcs in host_sources(con).values() for s in srcs if s.startswith("linux-hwe-")}
     keys = {(c, s) for (c, s) in keys if not kernel_variant(s) and not (s.startswith("linux-hwe-") and s not in keep_hwe)}
@@ -171,16 +201,18 @@ def build(con, date_from, date_to, min_priority="medium", status_filter="", have
     for cve, src in keys:
         v = vulns[cve]
         row = {"cve_id": cve, "priority": v["priority"], "published": (v["published"] or "")[:10],
-               "description": _desc(cve, v["details"]), "package": src, "codes": {}}
+               "description": _desc(cve, v["details"]), "package": src, "codes": {}, "fix": {}}
         for col, rel in RELEASES:
             code, pro, fx = resolve(vex.get((cve, src, rel)), fixed.get((cve, src, rel)), rel, have_vex) if src else ("none", False, "")
-            row["codes"][col] = code
-            row[col] = cell_text(code, pro, fx, rel)
+            code, fix = as_of(code, pro, fx, cve, src, rel, usn, date_to)
+            row["codes"][col], row["fix"][col] = code, fix
+            row[col] = cell_text(code, pro, fix[0] if fix else fx, rel, fix[2] if fix else "")
         rows.append(row)
 
     summary = _summary(rows, levels)
+    summary["kernel"], summary["kernel_detail"] = kernel_summary(rows, date_from, date_to)
     if status_filter == "open":
-        rows = [r for r in rows if any(c in UNRESOLVED for c in r["codes"].values())]
+        rows = [r for r in rows if any(c in OPEN_AT_END for c in r["codes"].values())]
     elif status_filter:
         rows = [r for r in rows if status_filter in r["codes"].values()]
     rows.sort(key=lambda x: (PRIO.get(x["priority"], 5), x["cve_id"], x["package"]))
@@ -209,9 +241,73 @@ def _summary(rows, levels):
                 cnt[worst.get((c, col), "none")] += 1
             s[col] = cnt
         by_level[lv] = s
+    optional = ("unknown", "fixed-after", "fixed-nodate")        # 有數字才顯示這一欄
     used = [code for code, _, _, _ in STATUSES
-            if code != "unknown" or any(by_level[lv][col]["unknown"] for lv in levels for col, _ in RELEASES)]
+            if code not in optional or any(by_level[lv][col][code] for lv in levels for col, _ in RELEASES)]
     return {"levels": levels, "by_level": by_level, "statuses": used, "total": len(prio), "total_kernel": len(kernel)}
+
+
+_SERIES_ORDER = lambda s: (0, ()) if s == "linux" else (1, _hwe_series(s))
+
+
+def kernel_summary(rows, date_from, date_to):
+    """每個 Ubuntu 版本 × kernel 系列：期末前已修正的 kernel CVE 要升級到哪個版本（取最高的修正版本）
+
+    給風險評鑑單用：本期（CVE 公開日期在區間內）的 kernel 弱點有幾個、截至期末升級到哪一版可以修補、
+    最高的修正版本來自哪個 CVE／USN；期末仍未修正與修正日期不明的另外列出。回傳 (摘要列, 明細列)"""
+    groups, detail = {}, []
+    for r in rows:
+        if not is_kernel(r["package"]):
+            continue
+        for col, rel in RELEASES:
+            code = r["codes"][col]
+            if code in ("none", "not-affected", "not-in-release"):
+                continue
+            groups.setdefault((rel, r["package"]), []).append((r, col, code))
+            fix = r["fix"].get(col) or ("", "", "")
+            detail.append({"release": rel, "series": r["package"], "cve": r["cve_id"], "priority": r["priority"],
+                           "published": r["published"], "status": LABEL.get(code, code), "code": code,
+                           "fixed": fix[0] or "", "usn": fix[1] or "", "fix_date": fix[2] or ""})
+    out = []
+    for (rel, src) in sorted(groups, key=lambda k: (k[0], _SERIES_ORDER(k[1]))):
+        items = groups[(rel, src)]
+        prio = {}
+        for r, col, code in items:
+            prio[r["cve_id"]] = r["priority"]
+        fixed = [(r["fix"][col][0], r["cve_id"], r["fix"][col][1], r["fix"][col][2]) for r, col, code in items if code == "fixed"]
+        later = sorted({(r["fix"][col][2], r["cve_id"]) for r, col, code in items if code == "fixed-after"})
+        still = sorted({r["cve_id"] for r, col, code in items if code in UNRESOLVED})
+        nodate = sorted({r["cve_id"] for r, col, code in items if code == "fixed-nodate"})
+        top, same = None, 0
+        if fixed:
+            best = max(fixed, key=functools.cmp_to_key(lambda a, b: vercmp(a[0], b[0])))[0]
+            tied = [f for f in fixed if vercmp(f[0], best) == 0]
+            top = min(tied, key=lambda f: (f[3], f[1]))           # 同版本多個：取 USN 最早、再取 CVE 編號最小（固定、可重現）
+            same = len({f[1] for f in tied})
+        by_lv = [(lv, sum(1 for p in prio.values() if p == lv)) for lv in LEVELS]
+        by_lv = [(lv, n) for lv, n in by_lv if n]
+        open_n = len(later) + len(still)
+        s = "Ubuntu %s（%s）：%s～%s 公開的 kernel 弱點共 %d 個（%s）" % (
+            rel, src, date_from, date_to, len(prio), "、".join("%s %d" % kv for kv in by_lv))
+        if top:
+            s += "，截至 %s 已修正 %d 個，升級到 %s 即可修補這 %d 個（取最高者 %s，%s，%s 發布%s）" % (
+                date_to, len({f[1] for f in fixed}), top[0], len({f[1] for f in fixed}), top[1], top[2], top[3],
+                "；同一版本修正的共 %d 個" % same if same > 1 else "")
+        else:
+            s += "，截至 %s 尚無已發布的修正" % date_to
+        if open_n:
+            s += "；期末仍未修正 %d 個" % open_n
+            if later:
+                s += "（其中 %d 個於期末後才修正）" % len(later)
+        if nodate:
+            s += "；另有 %d 個有修正版本但無法確認修正日期" % len(nodate)
+        out.append({"release": rel, "series": src, "total": len(prio), "by_level": by_lv,
+                    "fixed_n": len({f[1] for f in fixed}), "upgrade_to": top[0] if top else "",
+                    "top_cve": top[1] if top else "", "top_usn": top[2] if top else "", "top_date": top[3] if top else "",
+                    "top_same": same,
+                    "open_n": open_n, "later_n": len(later), "nodate_n": len(nodate), "sentence": s + "。"})
+    detail.sort(key=lambda d: (d["release"], _SERIES_ORDER(d["series"]), RANK.get(d["code"], 99), PRIO.get(d["priority"], 5), d["cve"]))
+    return out, detail
 
 
 def sort_rows(rows, key, desc=False):
@@ -238,7 +334,8 @@ def to_xlsx(rows, summary, date_from, date_to, min_priority, osv_date=None, vex_
             ("OSV 資料日期", osv_date or ""),
             ("VEX 資料日期（官方狀態）", vex_date or "未匯入：狀態只分「已修正／受影響」"),
             ("產生時間", datetime.datetime.now().strftime("%Y-%m-%d %H:%M")),
-            ("說明", "跟主機無關，是 Ubuntu 官方對每個 CVE 的處理狀態。CVE 數以 CVE 編號計；"
+            ("說明", "跟主機無關，是 Ubuntu 官方對每個 CVE 的處理狀態。「已修正」以報表期末日判斷（修正的 USN 在期末前發布）；"
+             "期末之後才修正的列為「期末後修正」，沒有 USN 的列為「已修正（日期不明）」。CVE 數以 CVE 編號計；"
              "一個 CVE 在某版本有多個套件時，以最需要注意的狀態計（順序見「狀態說明」）。"
              "20.04 以 Ubuntu Pro 為準；22.04／24.04 只有 Pro 修正時標（Pro）。「—」＝官方資料沒有這個套件／版本的紀錄。"
              "kernel 只列 linux、各版本最新的 HWE 與主機上有裝的 HWE。")]
@@ -263,6 +360,30 @@ def to_xlsx(rows, summary, date_from, date_to, min_priority, osv_date=None, vex_
     ws.column_dimensions["B"].width = 14
     for i in range(3, len(head) + 1):
         ws.column_dimensions[get_column_letter(i)].width = 16
+
+    kn = wb.create_sheet("Kernel 修補版本")
+    kn.append(["Kernel 修補版本（截至 %s）：每個 Ubuntu 版本 × kernel 系列，期末前已發布的修正要升級到哪個版本（取最高的修正版本）" % date_to])
+    kn.cell(1, 1).font = Font(bold=True)
+    kn.append(["Ubuntu", "kernel 系列", "kernel 弱點數", "等級", "期末前已修正", "升級到", "最高者 CVE", "USN", "USN 發布日",
+               "期末仍未修正", "其中期末後才修正", "修正日期不明", "評鑑單文字"])
+    for c in kn[2]:
+        c.font = Font(bold=True)
+    for k in summary.get("kernel", []):
+        kn.append([k["release"], k["series"], k["total"], "、".join("%s %d" % kv for kv in k["by_level"]), k["fixed_n"],
+                   k["upgrade_to"], k["top_cve"], k["top_usn"], k["top_date"], k["open_n"], k["later_n"], k["nodate_n"], k["sentence"]])
+        kn.cell(kn.max_row, 13).alignment = Alignment(wrap_text=True, vertical="top")
+    for col, w in zip("ABCDEFGHIJKLM", (9, 16, 12, 26, 12, 24, 17, 13, 12, 12, 14, 12, 90)):
+        kn.column_dimensions[col].width = w
+    kd = wb.create_sheet("Kernel 明細")
+    kd.append(["Ubuntu", "kernel 系列", "CVE", "等級", "公開日期", "期末狀態", "修正版本", "USN", "USN 發布日"])
+    for c in kd[1]:
+        c.font = Font(bold=True)
+    for d in summary.get("kernel_detail", []):
+        kd.append([d["release"], d["series"], d["cve"], d["priority"], d["published"], d["status"], d["fixed"], d["usn"], d["fix_date"]])
+    for col, w in zip("ABCDEFGHI", (9, 16, 17, 10, 11, 18, 26, 13, 12)):
+        kd.column_dimensions[col].width = w
+    kd.freeze_panes = "A2"
+    kd.auto_filter.ref = kd.dimensions
 
     lg = wb.create_sheet("狀態說明")
     lg.append(["狀態", "說明", "Ubuntu 官方名稱"])

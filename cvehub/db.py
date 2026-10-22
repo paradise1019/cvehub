@@ -42,6 +42,16 @@ CREATE TABLE IF NOT EXISTS affected (
 );
 CREATE INDEX IF NOT EXISTS affected_eco_src ON affected(ecosystem, source);
 CREATE INDEX IF NOT EXISTS affected_cve ON affected(cve);       -- 區間報表用
+-- 每個 CVE × 套件庫 × source 第一次被修正的 USN（輸出報表「截至期末」判斷修正日期）
+CREATE TABLE IF NOT EXISTS usn_fix (
+    cve TEXT NOT NULL,
+    ecosystem TEXT NOT NULL,
+    source TEXT NOT NULL,
+    fixed TEXT,
+    usn TEXT,
+    published TEXT,                -- USN 發布日 YYYY-MM-DD
+    PRIMARY KEY (cve, ecosystem, source)
+);
 CREATE TABLE IF NOT EXISTS binmap (
     ecosystem TEXT NOT NULL,
     binary TEXT NOT NULL,
