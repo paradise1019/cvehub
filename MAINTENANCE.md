@@ -10,6 +10,7 @@
 | 每季 | 重建 image（取得 Python、套件的安全更新） | `docker compose build --pull && docker compose run --rm --no-deps cvehub python -m unittest discover -s tests -t . </dev/null && docker compose up -d` | 測試 `OK`；網頁正常；`/healthz` 200 |
 | 每季 | 備份 | 複製 `data/cvehub.sqlite3`（建議先 `docker compose stop`，或用 `sqlite3 ... ".backup"`）、`.env`、`config/` 到別台機器 | 備份檔能用 sqlite3 開啟 |
 | 每季 | 檢查例外 | 「例外」頁看有沒有快到期或已過期的項目 | 過期的例外處理掉或延長 |
+| 每季 | 檢查帳號 | 「帳號管理」頁：離職或調動的人停用、看稽核紀錄有沒有異常登入失敗 | 只剩需要的帳號 |
 | 每年 | 更新相依套件版本 | 調整 `requirements.txt` 的版本號 → 重建 → 跑測試 | 測試 `OK` |
 
 ## 事件觸發
@@ -41,11 +42,11 @@
 2. 跑測試 → `OK` 再上線
 
 ### 升級 cvehub 本身
-1. 備份 `data/`
-2. 替換程式目錄（保留 `.env`、`config/`、`data/`）
-3. **和新的 `.env.example` 比對，把缺少的設定補進 `.env`**
-4. 建置 → 跑測試 → `docker compose up -d`
-5. 資料表會自動升級；確認網頁與 `/healthz` 正常
+1. 下載新版 zip，先看 `CHANGELOG.md` 的「升級注意」
+2. `sudo bash scripts/upgrade.sh <新版 zip>`（README 第 10 節；自動備份、測試、失敗還原）
+3. 腳本若列出「.env 沒有的新設定」：依 `.env.example` 的說明決定要不要補進 `.env`（不補就用預設值），補完 `docker compose up -d`
+4. 確認網頁右上角版本與 `/healthz` 正常；有問題 `--rollback`
+5. 新版正常一段時間後，刪掉 `backups/` 裡舊的備份
 
 ## 已知限制（處理前請先確認）
 - Landscape 的套件資料有延遲（最慢約 45 分鐘）

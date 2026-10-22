@@ -40,7 +40,10 @@
  <a href="{{ url_for('period_report') }}">輸出報表</a>
  <a href="{{ url_for('data') }}">資料匯入</a>
  <span style="flex:1"></span>
- <form class="inline" method="post" action="{{ url_for('sync_now') }}"><button {% if job.running %}disabled{% endif %}>立即同步</button></form>
+ {% if is_admin %}<a href="{{ url_for('users') }}">帳號管理</a>
+ <form class="inline" method="post" action="{{ url_for('sync_now') }}"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><button {% if job.running %}disabled{% endif %}>立即同步</button></form>{% endif %}
+ <a href="{{ url_for('account') }}" title="我的帳號">{{ user }}（{{ role_label[role] }}）</a>
+ <form class="inline" method="post" action="{{ url_for('logout') }}"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><button>登出</button></form>
  <span class="muted" style="color:#ccc">v{{ version }}</span>
 </header>
 <main>

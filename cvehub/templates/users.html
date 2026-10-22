@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}帳號管理{% endblock %}
+{% block body %}
+<div class="card intro"><b>帳號管理</b>：「檢視」可以看所有頁面、下載報表；「管理」另外可以上傳資料、設定例外、立即同步、管理帳號。
+改密碼、改角色、停用後，該帳號原本的登入會立即失效。連續輸錯密碼 5 次會鎖定 15 分鐘（重設密碼可解除）。</div>
+{% if msg %}<div class="card">{{ msg }}</div>{% endif %}{% if err %}<div class="card err">{{ err }}</div>{% endif %}
+<form class="card" method="post">
+ <b>新增帳號</b><input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="action" value="add">
+ 帳號 <input name="username" required size="16" autocomplete="off">
+ 角色 <select name="role">{% for k, v in roles %}<option value="{{ k }}">{{ v }}</option>{% endfor %}</select>
+ 初始密碼 <input type="password" name="password" required minlength="{{ min_len }}" size="18" autocomplete="new-password">
+ <button>新增</button> <span class="muted">密碼至少 {{ min_len }} 個字元，請另外告知本人並請他登入後到「我的帳號」變更。</span>
+</form>
+<table><tr><th>帳號</th><th>角色</th><th>狀態</th><th>最後登入</th><th>建立時間</th><th>變更角色</th><th>重設密碼</th><th>啟用／停用</th></tr>
+{% for u in rows %}<tr{% if not u.active %} class="muted"{% endif %}><td>{{ u.username }}</td><td>{{ role_label[u.role] }}</td>
+<td>{% if not u.active %}停用{% elif u.locked_until and u.locked_until > now %}鎖定到 {{ u.locked_until }}{% else %}啟用{% endif %}</td>
+<td class="muted">{{ u.last_login or '-' }}</td><td class="muted">{{ u.created_at }}</td>
+<td><form class="inline" method="post"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="action" value="role"><input type="hidden" name="uid" value="{{ u.id }}">
+ <select name="role">{% for k, v in roles %}<option value="{{ k }}" {% if u.role==k %}selected{% endif %}>{{ v }}</option>{% endfor %}</select> <button>變更</button></form></td>
+<td><form class="inline" method="post"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="action" value="password"><input type="hidden" name="uid" value="{{ u.id }}">
+ <input type="password" name="password" required minlength="{{ min_len }}" size="14" autocomplete="new-password"> <button>重設</button></form></td>
+<td><form class="inline" method="post"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="uid" value="{{ u.id }}">
+ {% if u.active %}<button name="action" value="disable">停用</button>{% else %}<button name="action" value="enable">啟用</button>{% endif %}</form></td></tr>{% endfor %}
+</table>
+<h3>稽核紀錄 <span class="muted">（最近 200 筆：登入、帳號變更、上傳、例外、同步）</span></h3>
+<table><tr><th>時間</th><th>帳號</th><th>IP</th><th>動作</th><th>內容</th></tr>
+{% for l in logs %}<tr><td class="nowrap muted">{{ l.ts }}</td><td>{{ l.username }}</td><td class="muted">{{ l.ip }}</td><td class="nowrap">{{ l.action }}</td><td>{{ l.detail }}</td></tr>{% endfor %}
+</table>{% endblock %}

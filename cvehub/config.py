@@ -72,7 +72,10 @@ class Config:
 
     WEB_LISTEN = _s("WEB_LISTEN", "0.0.0.0")
     WEB_PORT = _i("WEB_PORT", 8080)
-    WEB_AUTH_USER = _s("WEB_AUTH_USER", "admin")
+    WEB_AUTH_USER = _s("WEB_AUTH_USER", "admin")        # 舊版單一帳號：沒有任何帳號時自動轉成第一個管理員
+    WEB_SECRET_KEY = _s("WEB_SECRET_KEY")              # session 簽章金鑰；留空＝自動產生在資料目錄（.secret_key）
+    WEB_SESSION_IDLE_MINUTES = _i("WEB_SESSION_IDLE_MINUTES", 60)
+    WEB_COOKIE_SECURE = _b("WEB_COOKIE_SECURE", False)  # 放在 HTTPS 反向代理後面時設 true（容器直接提供 HTTPS 時自動開啟）
     WEB_AUTH_PASSWORD_HASH = _s("WEB_AUTH_PASSWORD_HASH")
     WEB_BASE_PATH = _s("WEB_BASE_PATH").rstrip("/")
     LOG_LEVEL = _s("LOG_LEVEL", "info")

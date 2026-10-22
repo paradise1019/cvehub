@@ -1,14 +1,16 @@
 """網頁與 API（Flask）"""
 import datetime
+import hmac
 import logging
 import os
+import secrets
 import threading
+import time
 import urllib.parse
 
-from flask import Flask, Response, abort, g, jsonify, redirect, render_template, request, url_for
-from werkzeug.security import check_password_hash
+from flask import Flask, Response, abort, g, jsonify, redirect, render_template, request, session, url_for
 
-from . import __version__, db, impact, osv_import, period, report, sync, vex_import
+from . import __version__, auth, db, impact, osv_import, period, report, sync, vex_import
 from .lock import Busy, job_lock
 from .config import PRIO, Config
 
@@ -84,24 +86,61 @@ def create_app(start_scheduler=True):
         app.config["APPLICATION_ROOT"] = Config.WEB_BASE_PATH
     con = db.connect()
     db.init(con)
+    auth.bootstrap(con)
     con.close()
+    app.secret_key = auth.secret_key()
+    app.config.update(SESSION_COOKIE_NAME="cvehub_session", SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
+                      SESSION_COOKIE_SECURE=Config.WEB_COOKIE_SECURE or bool(Config.WEB_TLS_CERT))
+
+    def _safe_next(target):
+        """登入後只導回本站的相對路徑"""
+        t = urllib.parse.urlparse(target or "")
+        if t.scheme or t.netloc or not t.path.startswith("/") or t.path.startswith("//"):
+            return url_for("index")
+        return t.path + ("?" + t.query if t.query else "")
 
     @app.before_request
-    def auth():
-        if request.path == "/healthz":      # 監控用，不需登入，只回健康狀態
-            g.con = db.connect()
+    def authenticate():
+        g.con = db.connect()
+        g.user, g.role = None, None
+        ep = request.endpoint or ""
+        if ep in ("healthz", "static"):          # 監控用，不需登入，只回健康狀態
             return None
-        if not Config.WEB_AUTH_PASSWORD_HASH:
-            abort(Response("WEB_AUTH_PASSWORD_HASH 未設定，拒絕服務（用 python -m cvehub.cli hash-password 產生）", 503))
-        a = request.authorization
-        if not a or a.username != Config.WEB_AUTH_USER or not check_password_hash(Config.WEB_AUTH_PASSWORD_HASH, a.password or ""):
-            return Response("需要登入", 401, {"WWW-Authenticate": 'Basic realm="cvehub"'})
-        if request.method == "POST":     # 防 CSRF：POST 必須來自同一個網站
+        if request.path.startswith("/api/"):     # 給腳本用：Basic Auth（任何啟用中的帳號）
+            a = request.authorization
+            u, _ = auth.verify_login(g.con, a.username, a.password) if a else (None, "")
+            if not u:
+                return Response("需要登入", 401, {"WWW-Authenticate": 'Basic realm="cvehub-api"'})
+            g.user, g.role = u["username"], u["role"]
+            return None
+        if request.method == "POST":
+            # 防 CSRF：POST 必須來自同一個網站，並帶 session 裡的 token
             src = request.headers.get("Origin") or request.headers.get("Referer") or ""
             if urllib.parse.urlparse(src).netloc != request.host:
                 abort(403)
-        g.con = db.connect()
-        g.user = a.username
+            if not hmac.compare_digest(str(request.form.get("csrf", "")), str(session.get("csrf", "-"))):
+                abort(Response("表單已過期，請重新整理頁面再試一次", 400))
+        if ep == "login":
+            return None
+        u = auth.get_user(g.con, session.get("uid", 0)) if session.get("uid") else None
+        idle = time.time() - session.get("seen", 0) > Config.WEB_SESSION_IDLE_MINUTES * 60
+        if not u or not u["active"] or u["session_ver"] != session.get("ver") or idle:
+            session.clear()
+            if request.method == "GET":
+                return redirect(url_for("login", next=request.full_path if request.query_string else request.path))
+            abort(401)
+        session["seen"] = int(time.time())
+        g.user, g.role = u["username"], u["role"]
+        if g.role != "admin" and (request.method == "POST" and ep not in ("logout", "account") or ep == "users"):
+            abort(Response("需要管理權限", 403))
+
+    def _ip():
+        return request.remote_addr or ""
+
+    def _csrf():
+        if "csrf" not in session:
+            session["csrf"] = secrets.token_urlsafe(32)
+        return session["csrf"]
 
     @app.teardown_request
     def close(_exc):
@@ -116,7 +155,80 @@ def create_app(start_scheduler=True):
         return {"osv": imp, "osv_stale": _age_days(imp) >= Config.OSV_STALE_WARN_DAYS, "vex": vex,
                 "vex_stale": _age_days(vex) >= Config.OSV_STALE_WARN_DAYS,
                 "data_gap": abs(_age_days(imp) - _age_days(vex)) if imp and vex else 0,
-                "job": _status, "version": __version__, "PRIO": PRIO, "cfg": Config}
+                "job": _status, "version": __version__, "PRIO": PRIO, "cfg": Config,
+                "user": g.get("user"), "role": g.get("role"), "is_admin": g.get("role") == "admin",
+                "role_label": auth.ROLE_LABEL, "csrf_token": _csrf}
+
+    # ------------------------------------------------------------ 登入／帳號
+    @app.route("/login", methods=["GET", "POST"])
+    def login():
+        err = ""
+        if request.method == "POST":
+            name = request.form.get("username", "")
+            u, err = auth.verify_login(g.con, name, request.form.get("password", ""))
+            if u:
+                session.clear()                  # 換一個新的 session（防 session fixation）
+                session.update(uid=u["id"], ver=u["session_ver"], seen=int(time.time()), csrf=secrets.token_urlsafe(32))
+                auth.audit(g.con, u["username"], _ip(), "login")
+                return redirect(_safe_next(request.form.get("next")))
+            auth.audit(g.con, name[:64], _ip(), "login-failed", err)
+        return render_template("login.html", err=err, next=request.values.get("next", ""))
+
+    @app.route("/logout", methods=["POST"])
+    def logout():
+        auth.audit(g.con, g.user, _ip(), "logout")
+        session.clear()
+        return redirect(url_for("login"))
+
+    @app.route("/account", methods=["GET", "POST"])
+    def account():
+        msg, err = "", ""
+        if request.method == "POST":
+            u, _ = auth.verify_login(g.con, g.user, request.form.get("current", ""))
+            if not u:
+                err = "目前的密碼不正確"
+            elif request.form.get("new") != request.form.get("new2"):
+                err = "兩次輸入的新密碼不一致"
+            else:
+                try:
+                    auth.set_password(g.con, u["id"], request.form.get("new", ""))
+                    session["ver"] = auth.get_user(g.con, u["id"])["session_ver"]     # 其他地方的登入失效，這裡保留
+                    auth.audit(g.con, g.user, _ip(), "password-changed")
+                    msg = "密碼已更新；其他裝置上的登入已登出"
+                except ValueError as e:
+                    err = str(e)
+        return render_template("account.html", msg=msg, err=err)
+
+    @app.route("/users", methods=["GET", "POST"])
+    def users():
+        """帳號管理（管理員）"""
+        c, msg, err = g.con, "", ""
+        if request.method == "POST":
+            act = request.form.get("action")
+            try:
+                if act == "add":
+                    auth.create_user(c, request.form.get("username", ""), request.form.get("password", ""), request.form.get("role", ""))
+                    detail = "%s（%s）" % (request.form.get("username", "").strip(), request.form.get("role"))
+                else:
+                    uid = int(request.form.get("uid", "0"))
+                    target = auth.get_user(c, uid) or abort(400)
+                    if act == "password":
+                        auth.set_password(c, uid, request.form.get("password", ""))
+                    elif act == "role":
+                        auth.update_user(c, uid, role=request.form.get("role"))
+                    elif act in ("disable", "enable"):
+                        auth.update_user(c, uid, active=(act == "enable"))
+                    else:
+                        abort(400)
+                    detail = target["username"]
+                auth.audit(c, g.user, _ip(), "user-" + act, detail)
+                msg = "已完成"
+            except ValueError as e:
+                err = str(e)
+        rows = c.execute("SELECT * FROM users ORDER BY lower(username)").fetchall()
+        logs = c.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT 200").fetchall()
+        return render_template("users.html", rows=rows, logs=logs, roles=auth.ROLES, msg=msg, err=err,
+                               min_len=auth.PASSWORD_MIN, now=datetime.datetime.now().isoformat(timespec="seconds"))
 
     # ------------------------------------------------------------ pages
     @app.route("/")
@@ -250,6 +362,7 @@ def create_app(start_scheduler=True):
                     abort(400)
                 with c:
                     c.execute("DELETE FROM exception WHERE id=?", (eid,))
+                auth.audit(c, g.user, _ip(), "exception-delete", str(eid))
             else:
                 hp, cv, reason = (request.form.get(k, "").strip() for k in ("host_pattern", "cve", "reason"))
                 exp = request.form.get("expires_at", "").strip() or None
@@ -263,6 +376,7 @@ def create_app(start_scheduler=True):
                 with c:
                     c.execute("INSERT INTO exception(host_pattern,cve,reason,expires_at,created_by,created_at) VALUES (?,?,?,?,?,?)",
                               (hp, cv.upper(), reason, exp, g.user, sync.now()))
+                auth.audit(c, g.user, _ip(), "exception-add", "%s %s %s" % (hp, cv.upper(), reason))
             return redirect(url_for("exceptions"))
         return render_template("exceptions.html", rows=c.execute("SELECT * FROM exception ORDER BY id DESC").fetchall(),
                                today=datetime.date.today().isoformat())
@@ -282,6 +396,7 @@ def create_app(start_scheduler=True):
             inbox = Config.OSV_INBOX_DIR if kind == "osv" else Config.VEX_INBOX_DIR
             os.makedirs(inbox, exist_ok=True)
             f.save(os.path.join(inbox, "%s-all-upload-%s.tar.xz" % (kind, datetime.datetime.now().strftime("%Y%m%d%H%M%S"))))
+            auth.audit(g.con, g.user, _ip(), "upload-" + kind, f.filename[:200])
             run_job("sync")      # sync 會先檢查放檔目錄並匯入
             return redirect(url_for("data"))
         rows = g.con.execute("SELECT * FROM osv_import ORDER BY id DESC LIMIT 20").fetchall()
@@ -291,6 +406,7 @@ def create_app(start_scheduler=True):
     @app.route("/sync", methods=["POST"])
     def sync_now():
         run_job("sync")
+        auth.audit(g.con, g.user, _ip(), "sync")
         ref = urllib.parse.urlparse(request.referrer or "")   # 只回到本站的頁面
         return redirect(ref.path if ref.netloc == request.host and ref.path.startswith("/") else url_for("index"))
 

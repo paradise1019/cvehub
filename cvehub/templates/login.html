@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>登入 - cvehub</title>
+<style>
+ body{font-family:system-ui,"Noto Sans TC",sans-serif;margin:0;background:#f6f8fa;color:#1f2328}
+ .box{max-width:340px;margin:12vh auto;background:#fff;border:1px solid #d0d7de;border-radius:6px;padding:1.4rem 1.6rem}
+ h1{font-size:1.3rem;margin:0 0 1rem} label{display:block;margin:.6rem 0 .2rem}
+ input{width:100%;box-sizing:border-box;font:inherit;padding:.4rem} button{margin-top:1rem;width:100%;font:inherit;padding:.45rem}
+ .err{background:#ffebe9;border:1px solid #ff8182;border-radius:4px;padding:.4rem .6rem;margin-bottom:.6rem}
+</style></head><body>
+<form class="box" method="post" action="{{ url_for('login') }}">
+ <h1>cvehub 登入</h1>
+ {% if err %}<div class="err">{{ err }}</div>{% endif %}
+ <input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="next" value="{{ next }}">
+ <label for="u">帳號</label><input id="u" name="username" autocomplete="username" required autofocus>
+ <label for="p">密碼</label><input id="p" name="password" type="password" autocomplete="current-password" required>
+ <button>登入</button>
+</form></body></html>

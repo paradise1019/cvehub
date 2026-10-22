@@ -5,7 +5,7 @@ services:
       args:
         # 內網改成 Nexus，例如 https://nexus.example.com/repository/pypi-proxy/simple
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
-    image: cvehub:0.5.1
+    image: cvehub:0.6.0
     env_file: .env
     ports:
       - "8080:8080"

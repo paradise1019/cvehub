@@ -134,6 +134,28 @@ CREATE TABLE IF NOT EXISTS exception (
     created_at TEXT NOT NULL
 );
 
+-- 帳號（角色 viewer／admin）與稽核紀錄
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL,            -- viewer | admin
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    last_login TEXT,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    locked_until TEXT,
+    session_ver INTEGER NOT NULL DEFAULT 1   -- 改密碼／角色／停用時加一，舊的登入失效
+);
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    username TEXT,
+    ip TEXT,
+    action TEXT NOT NULL,
+    detail TEXT
+);
+
 -- 每次同步的紀錄
 CREATE TABLE IF NOT EXISTS sync_run (
     id INTEGER PRIMARY KEY,

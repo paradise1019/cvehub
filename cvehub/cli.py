@@ -7,7 +7,12 @@
   report                  輸出報表到 REPORT_DIR
   period FROM TO [最低等級]
                           輸出報表（CVE 公開日期 FROM～TO，YYYY-MM-DD），輸出 Excel 到 REPORT_DIR
-  hash-password           產生網頁登入密碼的雜湊值（填入 WEB_AUTH_PASSWORD_HASH）
+  user-add NAME [admin|viewer]   新增帳號（互動輸入密碼；預設 viewer）
+  user-passwd NAME        重設密碼（互動輸入）；也會解除鎖定
+  user-role NAME admin|viewer    變更角色
+  user-disable NAME／user-enable NAME
+  user-list               列出帳號
+  hash-password           產生密碼雜湊（舊版 WEB_AUTH_PASSWORD_HASH 用；新部署改用 user-add）
 """
 import getpass
 import logging
@@ -16,7 +21,7 @@ import sys
 
 from werkzeug.security import generate_password_hash
 
-from . import db, osv_import, period, report, sync, vex_import
+from . import auth, db, osv_import, period, report, sync, vex_import
 from .lock import Busy, job_lock
 from .config import Config
 
@@ -38,6 +43,8 @@ def main(argv=None):
         return 0
     con = db.connect()
     db.init(con)
+    if cmd.startswith("user-"):
+        return _user_cmd(con, cmd, argv[1:])
     if cmd == "init":
         print("資料庫：", Config.DB_PATH)
     elif cmd in ("import-osv", "import-vex", "sync"):
@@ -84,6 +91,51 @@ def main(argv=None):
         print(__doc__)
         return 1
     return 0
+
+
+def _ask_password():
+    p1 = getpass.getpass("密碼（至少 %d 個字元）：" % auth.PASSWORD_MIN)
+    p2 = getpass.getpass("再輸入一次：")
+    if p1 != p2:
+        raise ValueError("兩次輸入不一致")
+    return p1
+
+
+def _user_cmd(con, cmd, args):
+    try:
+        if cmd == "user-list":
+            for u in con.execute("SELECT * FROM users ORDER BY lower(username)"):
+                print("%-20s %-6s %s  最後登入 %s%s" % (u["username"], u["role"], "啟用" if u["active"] else "停用",
+                                                   u["last_login"] or "-", "  鎖定到 " + u["locked_until"] if u["locked_until"] else ""))
+            return 0
+        if not args:
+            print(__doc__)
+            return 1
+        name = args[0]
+        if cmd == "user-add":
+            role = args[1] if len(args) > 1 else "viewer"
+            auth.create_user(con, name, _ask_password(), role)
+            auth.audit(con, "cli", "", "user-add", "%s（%s）" % (name, role))
+            print("已新增 %s（%s）" % (name, auth.ROLE_LABEL[role]))
+            return 0
+        u = con.execute("SELECT * FROM users WHERE lower(username)=lower(?)", (name,)).fetchone()
+        if not u:
+            raise ValueError("帳號不存在：%s" % name)
+        if cmd == "user-passwd":
+            auth.set_password(con, u["id"], _ask_password())
+        elif cmd == "user-role" and len(args) > 1:
+            auth.update_user(con, u["id"], role=args[1])
+        elif cmd in ("user-disable", "user-enable"):
+            auth.update_user(con, u["id"], active=(cmd == "user-enable"))
+        else:
+            print(__doc__)
+            return 1
+        auth.audit(con, "cli", "", cmd, name)
+        print("已完成")
+        return 0
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

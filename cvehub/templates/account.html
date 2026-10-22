@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}我的帳號{% endblock %}
+{% block body %}
+<div class="card"><b>{{ user }}</b>（{{ role_label[role] }}）</div>
+{% if msg %}<div class="card">{{ msg }}</div>{% endif %}{% if err %}<div class="card err">{{ err }}</div>{% endif %}
+<form class="card" method="post" style="max-width:420px">
+ <b>變更密碼</b><input type="hidden" name="csrf" value="{{ csrf_token() }}">
+ <p>目前的密碼<br><input type="password" name="current" autocomplete="current-password" required style="width:100%"></p>
+ <p>新密碼（至少 12 個字元）<br><input type="password" name="new" autocomplete="new-password" required minlength="12" style="width:100%"></p>
+ <p>再輸入一次<br><input type="password" name="new2" autocomplete="new-password" required minlength="12" style="width:100%"></p>
+ <button>變更密碼</button>
+</form>{% endblock %}

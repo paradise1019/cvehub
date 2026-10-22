@@ -4,14 +4,14 @@
 <div class="card intro">兩份資料都來自 Canonical，<b>請一起下載、一起更新</b>：
 <b>OSV</b> 用來判斷主機要不要更新（有正確的第一個修正版本）；<b>VEX</b> 提供官方處理狀態（Needs evaluation、Vulnerable、Ignored、Not affected…），給輸出報表與受影響主機用。
 也可以把檔案直接放到容器的放檔目錄（OSV：{{ cfg.OSV_INBOX_DIR }}；VEX：{{ cfg.VEX_INBOX_DIR }}），會自動檢查。匯入完成後自動重新比對。</div>
-<div class="grid">
-<form class="card" method="post" enctype="multipart/form-data" style="text-align:left"><input type="hidden" name="kind" value="osv">
+{% if is_admin %}<div class="grid">
+<form class="card" method="post" enctype="multipart/form-data" style="text-align:left"><input type="hidden" name="kind" value="osv"><input type="hidden" name="csrf" value="{{ csrf_token() }}">
  <b>上傳 osv-all.tar.xz</b><br><span class="muted">https://security-metadata.canonical.com/osv/osv-all.tar.xz（約 50 MB，匯入約 1–3 分鐘）</span><br>
  <input type="file" name="file" accept=".xz" required> <button>上傳並匯入</button></form>
-<form class="card" method="post" enctype="multipart/form-data" style="text-align:left"><input type="hidden" name="kind" value="vex">
+<form class="card" method="post" enctype="multipart/form-data" style="text-align:left"><input type="hidden" name="kind" value="vex"><input type="hidden" name="csrf" value="{{ csrf_token() }}">
  <b>上傳 vex-all.tar.xz</b><br><span class="muted">https://security-metadata.canonical.com/vex/vex-all.tar.xz（約 80 MB，匯入約 3–5 分鐘）</span><br>
  <input type="file" name="file" accept=".xz" required> <button>上傳並匯入</button></form>
-</div>
+</div>{% else %}<div class="card muted">上傳資料需要「管理」角色。</div>{% endif %}
 <h3>OSV 匯入紀錄</h3>
 <table><tr><th>檔案</th><th>檔案日期</th><th>匯入時間</th><th>版本（筆數）</th><th>CVE</th><th>affected</th><th>結果</th><th>使用中</th><th>sha256</th><th>訊息</th></tr>
 {% for r in rows %}<tr><td>{{ r.filename }}</td><td>{{ r.file_mtime }}</td><td>{{ r.imported_at }}</td><td>{{ r.release_counts or r.releases }}</td><td class="num">{{ r.cve_count or '' }}</td>

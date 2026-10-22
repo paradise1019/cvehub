@@ -45,7 +45,7 @@ sudo docker compose build
 - 內網要從 Nexus 抓 Python 套件：`sudo PIP_INDEX_URL=https://<nexus>/repository/<pypi-proxy>/simple docker compose build`
 - 基礎 image 要從內部 registry 拿：加上 `--build-arg BASE_IMAGE=<registry>/python:3.12-slim`
 
-✅ `sudo docker images cvehub` 看得到 `cvehub:0.5.1`（約 190 MB）。
+✅ `sudo docker images cvehub` 看得到 `cvehub:0.6.0`（約 190 MB）。
 
 ### 步驟 4：準備設定檔與資料目錄
 ```bash
@@ -80,20 +80,17 @@ Landscape 是自簽憑證時，把 Landscape 伺服器上的 `/etc/ssl/certs/lan
 | `TZ` | 時區，例如 `Asia/Taipei` |
 | `SCHEDULE_SYNC` | 自動同步時間（cron 格式），預設每天 06:00、18:00 |
 
-### 步驟 8：設定網頁登入密碼
+### 步驟 8：建立第一個管理員帳號
 ```bash
 cd /opt/cvehub
-sudo docker compose run --rm --no-deps cvehub python -m cvehub.cli hash-password
+sudo docker compose run --rm --no-deps cvehub python -m cvehub.cli user-add admin admin
 ```
-輸入兩次密碼（至少 12 個字元），把輸出的整串（`scrypt:...`）填到 `.env` 的 `WEB_AUTH_PASSWORD_HASH=`。
-⚠️ 雜湊值裡有 `$`，在 `.env` 裡**每個 `$` 都要寫成 `$$`**（docker compose 會把 `$` 當成變數）。
-✅ 下面這行印出 `2`：
-```bash
-sudo docker compose run --rm --no-deps cvehub sh -c 'echo "$WEB_AUTH_PASSWORD_HASH" | tr -cd "$" | wc -c'
-```
+（第一個 `admin` 是帳號名稱，可以自己取；第二個 `admin` 是角色。）輸入兩次密碼（至少 12 個字元）。
+✅ 印出「已新增 admin（管理）」；`sudo docker compose run --rm --no-deps cvehub python -m cvehub.cli user-list` 看得到這個帳號。
+其他人的帳號登入後在「帳號管理」頁建立（見第 5.1 節）。
 
 ### 步驟 9：決定 HTTP 或 HTTPS
-帳號密碼用 Basic Auth 傳送，**正式環境請用 HTTPS**（第 7 節：放在反向代理後面，或容器直接提供 HTTPS）。只在測試網段試用時可以先用 HTTP。
+登入時密碼會經過網路傳送，**正式環境請用 HTTPS**（第 7 節：放在反向代理後面，或容器直接提供 HTTPS）。只在測試網段試用時可以先用 HTTP。
 
 ### 步驟 10：啟動
 ```bash
@@ -123,7 +120,7 @@ sudo docker compose logs --tail 20
 ✅ 指令最後印出「同步完成：主機 N、…」，N 是 Landscape 裡的主機數。
 
 ### 步驟 12：確認網頁
-1. 瀏覽器開 `http(s)://<主機>:8080/`，用 `WEB_AUTH_USER`（預設 `admin`）和步驟 8 的密碼登入。
+1. 瀏覽器開 `http(s)://<主機>:8080/`，用步驟 8 建立的帳號登入。
 2. 逐頁確認：
    - 總覽：主機清單、每台的 CVE 數
    - 資料匯入：OSV、VEX 兩份最新一筆都是 `ok`、使用中＝是；VEX「無法辨識」是 0
@@ -208,7 +205,20 @@ kernel API 查詢失敗（不是 404）時，沿用上一次取得的 kernel 資
 | 例外 | 風險接受：主機（可用 `*`）＋ CVE（可用 `*`）＋原因＋到期日；不刪資料，只在畫面與報表上標示 |
 | 資料匯入 | 上傳 osv-all.tar.xz、vex-all.tar.xz，兩份的匯入紀錄（sha256、檔案日期、VEX 無法辨識的說明數） |
 
-每個清單都有「匯出 CSV」（含 BOM，Excel 直接開中文不亂碼）。JSON API：`/api/findings`、`/api/status`。
+### 5.1 帳號與權限
+
+| 角色 | 可以做的事 |
+|---|---|
+| 檢視 | 看所有頁面、下載 Excel／CSV、變更自己的密碼 |
+| 管理 | 另外可以上傳 OSV／VEX、新增／刪除例外、立即同步、帳號管理 |
+
+- 帳號管理（右上角「帳號管理」，只有管理員看得到）：新增帳號、重設密碼、變更角色、停用；下方是稽核紀錄（登入、帳號變更、上傳、例外、同步）。
+- 密碼至少 12 個字元，只存雜湊值。連續輸錯 5 次鎖 15 分鐘（管理員重設密碼可解除）。閒置 60 分鐘自動登出（`WEB_SESSION_IDLE_MINUTES`）。
+- 改密碼、改角色、停用後，該帳號原本的登入立即失效。至少會保留一個啟用中的管理員。
+- 忘記密碼、管理員都進不去時，在主機上用指令重設：`sudo docker compose exec cvehub python -m cvehub.cli user-passwd admin`
+- 腳本呼叫 `/api/findings`、`/api/status` 用 Basic Auth（任何啟用中的帳號，建議另建一個「檢視」帳號給腳本用）。
+
+每個清單都有「匯出 CSV」（含 BOM，Excel 直接開中文不亂碼）。JSON API：`/api/findings`、`/api/status`（Basic Auth，見 5.1）。
 
 ## 6. 指令列
 
@@ -216,6 +226,11 @@ kernel API 查詢失敗（不是 404）時，沿用上一次取得的 kernel 資
 docker compose exec cvehub python -m cvehub.cli sync </dev/null         # 立即同步
 docker compose exec cvehub python -m cvehub.cli import-osv /data/inbox/osv-all.tar.xz </dev/null
 docker compose exec cvehub python -m cvehub.cli report </dev/null       # 重新輸出報表
+docker compose exec cvehub python -m cvehub.cli user-list </dev/null    # 列出帳號
+docker compose exec cvehub python -m cvehub.cli user-add <帳號> viewer  # 新增帳號（互動輸入密碼；角色 viewer 或 admin）
+docker compose exec cvehub python -m cvehub.cli user-passwd <帳號>      # 重設密碼（也會解除鎖定）
+docker compose exec cvehub python -m cvehub.cli user-role <帳號> admin
+docker compose exec cvehub python -m cvehub.cli user-disable <帳號>     # user-enable 重新啟用
 ```
 （`</dev/null`：在腳本裡呼叫時避免 `docker compose exec` 吃掉後面的輸入。）
 同步／匯入同時只會有一個在執行（網頁按鈕、排程、指令列共用一把鎖）。
@@ -277,17 +292,52 @@ WEB_TLS_KEY=/config/tls.key
 docker compose build
 docker compose run --rm --no-deps cvehub python -m unittest discover -s tests -t . </dev/null
 ```
-✅ 最後一行是 `OK`（目前 51 個測試，約 8 秒；不需要網路、Landscape 或真的 OSV／VEX 檔）。
+✅ 最後一行是 `OK`（目前 57 個測試，約 9 秒；不需要網路、Landscape 或真的 OSV／VEX 檔）。
 過程中會印出一段 `ValueError: 檔案中沒有任何 24.04 的資料`，那是「錯誤檔案應該被拒絕」的測試，正常。
 
 涵蓋：Debian 版本比較、OSV 匯入（撤回的 CVE、其他版本、惡意路徑、缺版本時保留舊資料、放檔目錄）、比對（已修／未修／部分修、Pro 才有的修正、舊 kernel、執行中 kernel 的 reboot／upgrade+reboot、kernel 名稱不在 OSV 時的推回）、歷史（新增→解決→再出現）、例外、kernel API（JSON／純文字／404／URL 編碼／主機對應）、網頁（登入、CSRF、XSS、/healthz、CSV）。
 
-## 10. 備份與升級
+## 10. 更新與回復
 
-- 要備份的只有 `data/cvehub.sqlite3`（歷史與例外）和 `.env`、`config/`
-- 定期維護請見 `MAINTENANCE.md`
-- 升級：替換程式目錄 → `docker compose build && docker compose up -d`；資料表會自動建立或升級
-- ⚠️ 新版可能有新的設定項目：升級後和新的 `.env.example` 比對，把缺少的項目補進 `.env`（缺少時使用預設值，例如 `KERNEL_API_MODE` 預設是 `bulk`）
+### 10.1 取得新版
+- 有網路：GitHub 頁面右側「Releases／Tags」選版本 → 下載 **Source code (zip)**，或直接下載
+  `https://github.com/paradise1019/cvehub/archive/refs/tags/v<版本>.zip`（例：`v0.6.0.zip`）
+- 只想拿最新開發版：Code → Download ZIP（`main` 分支）
+- 先看 `CHANGELOG.md` 的「升級注意」
+
+### 10.2 用更新腳本（建議）
+把 zip 複製到主機（例如 `/tmp/cvehub-0.6.0.zip`），然後：
+```bash
+cd /opt/cvehub
+sudo bash scripts/upgrade.sh /tmp/cvehub-0.6.0.zip
+```
+腳本會顯示「目前版本 → 新版本」與更新說明，確認後依序：
+1. 備份程式與設定到 `backups/<時間>-<舊版本>/code.tgz`
+2. 替換程式檔（**`.env`、`data/`、`config/`、`docker-compose.override.yml` 不會動**）
+3. 建立新版 image、跑自動化測試——**失敗就自動還原程式，舊版容器照常運作，不會停機**
+4. 停止容器、備份資料庫到同一個備份目錄
+5. 啟動新版（資料庫結構與資料格式會自動升級）
+6. 等容器 healthy，印出 `/healthz`
+
+✅ 最後印出「已更新到 x.y.z」與回復指令。到網頁右上角確認版本號。
+
+**第一次從 0.5.x 更新**（舊版還沒有 `scripts/`）：用新版裡的腳本，並指定安裝目錄：
+```bash
+mkdir /tmp/cvehub-new && cd /tmp/cvehub-new && python3 -m zipfile -e /tmp/cvehub-0.6.0.zip .
+sudo CVEHUB_DIR=/opt/cvehub bash /tmp/cvehub-new/*/scripts/upgrade.sh /tmp/cvehub-0.6.0.zip
+```
+
+### 10.3 回復
+```bash
+cd /opt/cvehub
+ls backups/                                         # 找到更新前的備份，例：20261022-093000-0.5.1
+sudo bash scripts/upgrade.sh --rollback backups/20261022-093000-0.5.1
+```
+程式與資料庫都回到更新前（更新後的同步結果會在下次同步重新產生；`.env`、`config/` 不會被還原）。
+
+### 10.4 備份
+- 定期複製 `data/cvehub.sqlite3`（建議先 `docker compose stop`，或用 `sqlite3 ... ".backup"`）、`.env`、`config/` 到別台機器
+- `backups/` 每次更新會多一份（含資料庫），確認新版正常後可以刪掉舊的
 
 ## 11. 限制
 

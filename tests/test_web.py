@@ -1,13 +1,23 @@
+import base64
 import io
 import os
 import re
+import time
 import unittest
 
 from werkzeug.security import generate_password_hash
 
-from cvehub import osv_import, sync, vex_import
+from cvehub import auth, osv_import, sync, vex_import
 from cvehub.config import Config
 from tests.helpers import RECORDS, TempEnv, make_osv_tar, make_vex_tar
+
+
+def login(client, user, password):
+    client.get("/login")
+    with client.session_transaction() as s:
+        tok = s["csrf"]
+    return client.post("/login", data={"csrf": tok, "username": user, "password": password, "next": "/"},
+                       headers={"Origin": "http://localhost"})
 
 
 class WebTest(unittest.TestCase):
@@ -15,28 +25,47 @@ class WebTest(unittest.TestCase):
         self.env = TempEnv(WEB_AUTH_USER="admin", WEB_AUTH_PASSWORD_HASH=generate_password_hash("correct horse battery"),
                            OSV_STALE_WARN_DAYS=100000).__enter__()
         osv_import.import_file(self.env.con, make_osv_tar(os.path.join(self.env.dir.name, "o.tar.xz"), RECORDS))
-        from cvehub.web import create_app
-        self.app = create_app(start_scheduler=False)
+        from cvehub import web
+        self._run_job = web.run_job
+        web.run_job = lambda kind, path=None: True        # 不在背景真的同步
+        self.app = web.create_app(start_scheduler=False)
         self.c = self.app.test_client()
-        self.auth = {"Authorization": "Basic " + __import__("base64").b64encode(b"admin:correct horse battery").decode()}
+        self.auth = {}           # 已用 session 登入（舊測試沿用 headers=self.auth）
+        self.assertEqual(login(self.c, "admin", "correct horse battery").status_code, 302)
+
+    def post(self, url, data=None, headers=None, client=None):
+        """帶 CSRF token 與同站 Origin 的 POST"""
+        client = client or self.c
+        with client.session_transaction() as s:
+            tok = s.get("csrf", "")
+        return client.post(url, data=dict(data or {}, csrf=tok), headers=dict({"Origin": "http://localhost"}, **(headers or {})))
 
     def tearDown(self):
+        from cvehub import web
+        web.run_job = self._run_job
         self.env.__exit__()
 
     def test_requires_login(self):
-        self.assertEqual(self.c.get("/").status_code, 401)
-        bad = {"Authorization": "Basic " + __import__("base64").b64encode(b"admin:wrong").decode()}
-        self.assertEqual(self.c.get("/", headers=bad).status_code, 401)
-        self.assertEqual(self.c.get("/", headers=self.auth).status_code, 200)
+        anon = self.app.test_client()
+        r = anon.get("/period?from=2026-01-01&to=2026-01-31")
+        self.assertEqual(r.status_code, 302)
+        self.assertIn("/login?next=", r.headers["Location"])
+        self.assertEqual(anon.get("/api/status").status_code, 401)
+        bad = {"Authorization": "Basic " + base64.b64encode(b"admin:wrong").decode()}
+        self.assertEqual(anon.get("/api/status", headers=bad).status_code, 401)
+        ok = {"Authorization": "Basic " + base64.b64encode(b"admin:correct horse battery").decode()}
+        self.assertEqual(anon.get("/api/status", headers=ok).status_code, 200)     # API 用 Basic Auth
+        self.assertEqual(anon.get("/", headers=ok).status_code, 302)               # 網頁不接受 Basic Auth
+        self.assertEqual(self.c.get("/").status_code, 200)
 
     def test_csrf(self):
-        self.assertEqual(self.c.post("/sync", headers=self.auth).status_code, 403)
-        h = dict(self.auth, Origin="http://evil.example.com")
-        self.assertEqual(self.c.post("/sync", headers=h).status_code, 403)
+        self.assertEqual(self.c.post("/sync", headers={"Origin": "http://localhost"}).status_code, 400)   # 沒有 token
+        self.assertEqual(self.post("/sync", headers={"Origin": "http://evil.example.com"}).status_code, 403)
+        self.assertEqual(self.post("/sync").status_code, 302)
 
     def test_xss_escaped(self):
         h = dict(self.auth, Origin="http://localhost")
-        self.c.post("/exceptions", headers=h, data={"host_pattern": "x", "cve": "CVE-1", "reason": "<script>alert(1)</script>"})
+        self.post("/exceptions", headers=h, data={"host_pattern": "x", "cve": "CVE-1", "reason": "<script>alert(1)</script>"})
         page = self.c.get("/exceptions", headers=self.auth).get_data(as_text=True)
         self.assertNotIn("<script>alert(1)</script>", page)
         self.assertIn("&lt;script&gt;", page)
@@ -57,9 +86,9 @@ class WebTest(unittest.TestCase):
 
     def test_bad_input_400_and_redirect(self):
         h = dict(self.auth, Origin="http://localhost")
-        self.assertEqual(self.c.post("/exceptions", headers=h, data={"delete": "x"}).status_code, 400)
-        self.assertEqual(self.c.post("/exceptions", headers=h, data={"host_pattern": "a", "cve": "b", "reason": "c", "expires_at": "bad"}).status_code, 400)
-        r = self.c.post("/sync", headers=dict(self.auth, Referer="http://localhost/period?x=1"))
+        self.assertEqual(self.post("/exceptions", headers=h, data={"delete": "x"}).status_code, 400)
+        self.assertEqual(self.post("/exceptions", headers=h, data={"host_pattern": "a", "cve": "b", "reason": "c", "expires_at": "bad"}).status_code, 400)
+        r = self.post("/sync", headers={"Origin": "", "Referer": "http://localhost/period?x=1"})
         self.assertEqual(r.headers["Location"], "/period")
         from cvehub import report
         self.assertEqual(report.safe_cell("=HYPERLINK(1)"), "'=HYPERLINK(1)")
@@ -76,6 +105,7 @@ class WebTest(unittest.TestCase):
 class PeriodWebTest(unittest.TestCase):
     setUp = WebTest.setUp
     tearDown = WebTest.tearDown
+    post = WebTest.post
 
     def with_vex(self):
         make_vex_tar(os.path.join(self.env.dir.name, "v.tar.xz"), {
@@ -172,8 +202,83 @@ class PeriodWebTest(unittest.TestCase):
         self.assertEqual(self.c.get("/osv", headers=self.auth).status_code, 302)
         self.assertEqual(self.c.get("/data", headers=self.auth).status_code, 200)
         h = dict(self.auth, Origin="http://localhost")
-        r = self.c.post("/data", headers=h, data={"kind": "evil", "file": (io.BytesIO(b"x"), "a.tar.xz")})
+        r = self.post("/data", headers=h, data={"kind": "evil", "file": (io.BytesIO(b"x"), "a.tar.xz")})
         self.assertEqual(r.status_code, 400)
+
+
+
+class AuthTest(unittest.TestCase):
+    setUp = WebTest.setUp
+    tearDown = WebTest.tearDown
+    post = WebTest.post
+
+    def test_bootstrap_from_env(self):
+        u = self.env.con.execute("SELECT * FROM users").fetchall()
+        self.assertEqual([(x["username"], x["role"]) for x in u], [("admin", "admin")])
+        self.assertFalse(auth.bootstrap(self.env.con))          # 已有帳號就不再建立
+
+    def test_login_lockout_and_open_redirect(self):
+        anon = self.app.test_client()
+        for _ in range(auth.LOCK_AFTER - 1):
+            self.assertIn("帳號或密碼錯誤", login(anon, "admin", "wrong").get_data(as_text=True))
+        self.assertIn("暫時鎖定", login(anon, "admin", "wrong").get_data(as_text=True))
+        self.assertIn("暫時鎖定", login(anon, "admin", "correct horse battery").get_data(as_text=True))   # 鎖定中密碼對也不行
+        self.assertIn("帳號或密碼錯誤", login(anon, "nobody", "x").get_data(as_text=True))                # 不透露帳號是否存在
+        b = self.app.test_client()
+        self.env.con.execute("UPDATE users SET locked_until=NULL")
+        self.env.con.commit()
+        b.get("/login")
+        with b.session_transaction() as s:
+            tok = s["csrf"]
+        r = b.post("/login", data={"csrf": tok, "username": "admin", "password": "correct horse battery", "next": "https://evil.example.com/"},
+                   headers={"Origin": "http://localhost"})
+        self.assertEqual(r.headers["Location"], "/")                  # 不導到外部網址
+
+    def test_viewer_is_read_only(self):
+        auth.create_user(self.env.con, "boss", "viewer-password-123", "viewer")
+        v = self.app.test_client()
+        self.assertEqual(login(v, "boss", "viewer-password-123").status_code, 302)
+        self.assertEqual(v.get("/period?from=2026-01-01&to=2026-01-31&format=xlsx").status_code, 200)   # 可以下載報表
+        page = v.get("/exceptions").get_data(as_text=True)
+        self.assertNotIn('name="host_pattern"', page)
+        self.assertNotIn("立即同步", page)
+        self.assertEqual(self.post("/sync", client=v).status_code, 403)
+        self.assertEqual(self.post("/exceptions", {"host_pattern": "a", "cve": "b", "reason": "c"}, client=v).status_code, 403)
+        self.assertEqual(v.get("/users").status_code, 403)
+        self.assertEqual(self.post("/account", {"current": "viewer-password-123", "new": "another-password-456",
+                                                 "new2": "another-password-456"}, client=v).status_code, 200)
+        self.assertEqual(login(self.app.test_client(), "boss", "another-password-456").status_code, 302)
+
+    def test_admin_manages_users_and_sessions_invalidated(self):
+        r = self.post("/users", {"action": "add", "username": "ops", "role": "viewer", "password": "short"})
+        self.assertIn("至少 12", r.get_data(as_text=True))
+        self.post("/users", {"action": "add", "username": "ops", "role": "viewer", "password": "ops-password-1234"})
+        o = self.app.test_client()
+        login(o, "ops", "ops-password-1234")
+        self.assertEqual(o.get("/").status_code, 200)
+        uid = self.env.con.execute("SELECT id FROM users WHERE username='ops'").fetchone()[0]
+        self.post("/users", {"action": "disable", "uid": uid})
+        self.assertEqual(o.get("/").status_code, 302)                 # 停用後原本的登入立即失效
+        admin_id = self.env.con.execute("SELECT id FROM users WHERE username='admin'").fetchone()[0]
+        r = self.post("/users", {"action": "role", "uid": admin_id, "role": "viewer"})
+        self.assertIn("至少要保留一個啟用中的管理員", r.get_data(as_text=True))
+        log = [x["action"] for x in self.env.con.execute("SELECT action FROM audit_log")]
+        self.assertIn("user-add", log)
+        self.assertIn("user-disable", log)
+
+    def test_idle_timeout_and_logout(self):
+        with self.c.session_transaction() as s:
+            s["seen"] = int(time.time()) - Config.WEB_SESSION_IDLE_MINUTES * 60 - 5
+        self.assertEqual(self.c.get("/").status_code, 302)
+        login(self.c, "admin", "correct horse battery")
+        self.assertEqual(self.post("/logout").status_code, 302)
+        self.assertEqual(self.c.get("/").status_code, 302)
+
+    def test_secret_key_file(self):
+        k1, k2 = auth.secret_key(), auth.secret_key()
+        self.assertEqual(k1, k2)
+        path = os.path.join(os.path.dirname(Config.DB_PATH), ".secret_key")
+        self.assertEqual(oct(os.stat(path).st_mode & 0o777), "0o600")
 
 
 if __name__ == "__main__":
