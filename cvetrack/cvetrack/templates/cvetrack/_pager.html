@@ -1,0 +1,5 @@
+{% if page_obj.paginator.num_pages > 1 %}<div class="pager">
+{% if page_obj.has_previous %}<a href="?{{ page_obj.query }}{% if page_obj.query %}&{% endif %}page={{ page_obj.previous_page_number }}">‹ 上一頁</a>{% endif %}
+<b>{{ page_obj.number }}</b> / {{ page_obj.paginator.num_pages }}（共 {{ page_obj.paginator.count }} 筆）
+{% if page_obj.has_next %}<a href="?{{ page_obj.query }}{% if page_obj.query %}&{% endif %}page={{ page_obj.next_page_number }}">下一頁 ›</a>{% endif %}
+</div>{% else %}<p class="muted">共 {{ page_obj.paginator.count }} 筆</p>{% endif %}

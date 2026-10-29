@@ -1,0 +1,17 @@
+{% load cvetrack_tags %}<table>
+<tr>{% if selectable %}<th><input type="checkbox" data-check-all title="全選本頁"></th>{% endif %}<th>時間</th>{% if not hide_run %}<th>Run</th>{% endif %}{% if not hide_host %}<th>主機</th>{% endif %}<th>CVE</th><th>等級</th><th>套件</th><th>事件</th><th>原因</th><th>版本變化</th><th class="nowrap">修正版本</th><th>單號</th></tr>
+{% for e in rows %}<tr>
+ {% if selectable %}<td><input type="checkbox" name="ids" value="{{ e.id }}"></td>{% endif %}
+ <td class="nowrap">{{ e.created_at|date:"Y-m-d H:i" }}</td>
+ {% if not hide_run %}<td><a href="{% url 'cvetrack:run' e.run_id %}">#{{ e.run_id }}</a></td>{% endif %}
+ {% if not hide_host %}<td class="nowrap"><a href="{% url 'cvetrack:host' e.host_id %}">{{ e.host.hostname }}</a></td>{% endif %}
+ <td class="nowrap"><a href="{% url 'cvetrack:cve' e.cve %}">{{ e.cve }}</a>{% if e.excepted %} <span class="tag" title="已列例外">例外</span>{% endif %}</td>
+ <td>{% include "cvetrack/_prio.html" with p=e.priority %}</td>
+ <td>{{ e.package }}{% if e.location == 'running-kernel' %} <span class="muted">（執行中）</span>{% endif %}</td>
+ <td class="nowrap"><span class="tag k-{{ e.kind }}">{{ e.get_kind_display }}</span></td>
+ <td class="nowrap">{{ e.get_cause_display }}</td>
+ <td class="muted">{% with o=e.old n=e.new %}{% if e.kind == 'changed' %}{% if o.status != n.status %}{{ status_label|lookup:o.status }} → {{ status_label|lookup:n.status }} {% endif %}{% if o.action != n.action %}{{ action_label|lookup:o.action }} → {{ action_label|lookup:n.action }} {% endif %}{% if o.priority != n.priority %}{{ o.priority }} → {{ n.priority }}{% endif %}{% else %}{{ o|ver:"installed" }}{{ o|ver:"running" }}{% if o and n %} → {% endif %}{{ n|ver:"installed" }}{{ n|ver:"running" }}{% endif %}{% endwith %}</td>
+ <td class="muted">{% firstof e.new.fixed e.old.fixed %}</td>
+ <td class="nowrap">{% if e.ticket %}<a href="{% url 'cvetrack:ticket' e.ticket_id %}">{{ e.ticket.number }}</a>{% elif e.needs_ticket %}<span class="need">待補</span>{% endif %}</td>
+</tr>{% empty %}<tr><td colspan="12" class="muted">沒有事件</td></tr>{% endfor %}
+</table>

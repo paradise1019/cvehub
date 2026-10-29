@@ -1,0 +1,20 @@
+{% extends "cvetrack/layout.html" %}{% load cvetrack_tags %}{% block page_title %}弱點{% endblock %}{% block body %}
+<h1>目前的弱點</h1>
+<form class="filters" method="get">
+ <label>主機<input name="host" value="{{ f.host }}" size="14"></label>
+ <label>CVE<input name="cve" value="{{ f.cve }}" size="14"></label>
+ <label>套件<input name="package" value="{{ f.package }}" size="12"></label>
+ <label>等級（以上）<select name="priority"><option value="">全部</option>{% for p in prios %}<option {% if f.priority == p %}selected{% endif %}>{{ p }}</option>{% endfor %}</select></label>
+ <label>狀態<select name="status"><option value="">全部</option>{% for k, l in status_label.items %}<option value="{{ k }}" {% if f.status == k %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></label>
+ <label>要做的事<select name="action"><option value="">全部</option>{% for k, l in action_label.items %}{% if k %}<option value="{{ k }}" {% if f.action == k %}selected{% endif %}>{{ l }}</option>{% endif %}{% endfor %}</select></label>
+ <button>篩選</button> <a href="?">清除</a>
+</form>
+{% include "cvetrack/_export.html" %}
+<table><tr><th>主機</th><th>CVE</th><th>等級</th><th>套件</th><th>已安裝／執行中</th><th>修正版本</th><th>狀態</th><th>要做的事</th><th>第一次發現</th></tr>
+{% for x in page_obj %}<tr><td><a href="{% url 'cvetrack:host' x.host_id %}">{{ x.host.hostname }}</a></td>
+<td class="nowrap"><a href="{% url 'cvetrack:cve' x.cve %}">{{ x.cve }}</a></td><td>{% include "cvetrack/_prio.html" with p=x.priority %}</td>
+<td>{{ x.package }}</td><td class="muted">{{ x.installed }}{% if x.running %} 執行中 {{ x.running }}{% endif %}</td><td>{{ x.fixed }}</td>
+<td>{{ status_label|lookup:x.status }}</td><td>{{ action_label|lookup:x.action }}</td><td class="nowrap">{{ x.first_seen|date:"Y-m-d" }}</td></tr>
+{% empty %}<tr><td colspan="9" class="muted">沒有弱點</td></tr>{% endfor %}</table>
+{% include "cvetrack/_pager.html" %}
+{% endblock %}

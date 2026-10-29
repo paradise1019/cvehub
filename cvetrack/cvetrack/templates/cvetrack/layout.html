@@ -1,0 +1,31 @@
+{% extends base_template %}{% load static %}
+{% block title %}{% block page_title %}cvetrack{% endblock %} - cvetrack{% endblock %}
+{% block content %}
+<link rel="stylesheet" href="{% static 'cvetrack/cvetrack.css' %}">
+<script src="{% static 'cvetrack/cvetrack.js' %}" defer></script>
+<div class="ct">
+<header class="ct-top"><b>cvetrack</b>
+ <a href="{% url 'cvetrack:index' %}" {% if nav == 'index' %}class="on"{% endif %}>總覽</a>
+ <a href="{% url 'cvetrack:runs' %}" {% if nav == 'runs' or nav == 'run' %}class="on"{% endif %}>Run／差異</a>
+ <a href="{% url 'cvetrack:osv_list' %}" {% if nav == 'osv_list' or nav == 'osv_detail' %}class="on"{% endif %}>OSV 差異</a>
+ <a href="{% url 'cvetrack:findings' %}" {% if nav == 'findings' %}class="on"{% endif %}>弱點</a>
+ <a href="{% url 'cvetrack:hosts' %}" {% if nav == 'hosts' or nav == 'host' %}class="on"{% endif %}>主機</a>
+ <a href="{% url 'cvetrack:events' %}" {% if nav == 'events' %}class="on"{% endif %}>事件</a>
+ <a href="{% url 'cvetrack:unticketed' %}" {% if nav == 'unticketed' %}class="on"{% endif %}>待補單號{% if unticketed_count %} <span class="ct-badge">{{ unticketed_count }}</span>{% endif %}</a>
+ <a href="{% url 'cvetrack:tickets' %}" {% if nav == 'tickets' or nav == 'ticket' or nav == 'ticket_edit' %}class="on"{% endif %}>變更單</a>
+ {% if can_admin %}<a href="{% url 'cvetrack:data' %}" {% if nav == 'data' %}class="on"{% endif %}>資料匯入</a>
+ <a href="{% url 'cvetrack:audit' %}" {% if nav == 'audit' %}class="on"{% endif %}>稽核</a>{% endif %}
+ <span style="flex:1"></span>
+ {% if can_admin %}<form class="inline" method="post" action="{% url 'cvetrack:sync' %}">{% csrf_token %}<input type="hidden" name="next" value="{{ request.get_full_path }}"><button {% if running or sync_requested %}disabled{% endif %}>{% if running %}同步中…{% elif sync_requested %}已要求同步{% else %}立即同步{% endif %}</button></form>{% endif %}
+ {% if request.user.is_staff %}<a href="{% url 'admin:index' %}">Django Admin</a>{% endif %}
+ <span>{{ request.user.get_username }}</span>
+ <span class="muted" style="color:#bbb">v{{ version }}</span>
+</header>
+<main>
+{% if messages %}<ul class="msgs">{% for m in messages %}<li class="{{ m.tags }}">{{ m }}</li>{% endfor %}</ul>{% endif %}
+{% if not osv %}<div class="card err">尚未匯入 OSV 資料：{% if can_admin %}到「資料匯入」上傳 osv-all.tar.xz。{% else %}請管理員匯入。{% endif %}</div>
+{% elif osv_stale %}<div class="card warn">OSV 資料檔日期 {{ osv.file_mtime|date:"Y-m-d" }}，已經舊了，請更新。</div>{% endif %}
+{% if running %}<div class="card info">Run #{{ running.id }} 執行中（{{ running.started_at|date:"m-d H:i" }} 開始）。</div>{% endif %}
+{% block body %}{% endblock %}
+</main></div>
+{% endblock %}

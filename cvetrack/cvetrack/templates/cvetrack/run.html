@@ -1,0 +1,24 @@
+{% extends "cvetrack/layout.html" %}{% load cvetrack_tags %}{% block page_title %}Run #{{ run.id }}{% endblock %}{% block body %}
+<h1>Run #{{ run.id }} 差異報告</h1>
+<div class="card"><dl class="kv">
+ <dt>時間</dt><dd>{{ run.started_at|date:"Y-m-d H:i:s" }} ～ {{ run.finished_at|date:"H:i:s"|default:"執行中" }}</dd>
+ <dt>觸發</dt><dd>{{ run.get_trigger_display }}{% if run.baseline %}（第一次 Run：基準）{% endif %}</dd>
+ <dt>狀態</dt><dd>{{ run.get_status_display }} {{ run.message }}</dd>
+ <dt>OSV</dt><dd>{% if run.osv_import %}<a href="{% url 'cvetrack:osv' run.osv_import_id %}">#{{ run.osv_import_id }} {{ run.osv_import.filename }}</a>{% if osv_changes %}（這次換了新的 OSV，上一次是 #{{ run.prev_osv_import_id }}）{% endif %}{% endif %}</dd>
+ <dt>VEX</dt><dd>{% if run.vex_import %}#{{ run.vex_import_id }} {{ run.vex_import.filename }}{% else %}—{% endif %}</dd>
+ <dt>主機／未解決</dt><dd>{{ run.hosts|default_if_none:"" }} 台／{{ run.open_findings|default_if_none:"" }} 筆</dd>
+</dl></div>
+{% if run.counts and not run.baseline %}{% include "cvetrack/_run_counts.html" with r=run %}{% endif %}
+<h2>依事件與原因</h2>
+<table class="auto"><tr><th>事件</th><th>原因</th><th class="num">筆數</th><th class="num">主機</th><th class="num">CVE</th><th class="num">critical／high</th><th class="num">要補單號</th></tr>
+{% for m in matrix %}<tr><td><span class="tag k-{{ m.kind }}">{{ kind_label|lookup:m.kind }}</span></td>
+<td><a href="?kind={{ m.kind }}&cause={{ m.cause }}">{{ cause_label|lookup:m.cause }}</a></td>
+<td class="num">{{ m.n }}</td><td class="num">{{ m.hosts }}</td><td class="num">{{ m.cves }}</td><td class="num">{{ m.crit }}</td>
+<td class="num">{% if m.need %}<a class="need" href="{% url 'cvetrack:unticketed' %}?run={{ run.id }}&cause={{ m.cause }}">{{ m.need }}</a>{% endif %}</td></tr>
+{% empty %}<tr><td colspan="7" class="muted">這次沒有任何變化</td></tr>{% endfor %}</table>
+<h2>事件明細</h2>
+{% include "cvetrack/_event_filters.html" %}
+{% include "cvetrack/_export.html" %}
+{% include "cvetrack/_event_table.html" with rows=page_obj hide_run=1 %}
+{% include "cvetrack/_pager.html" %}
+{% endblock %}

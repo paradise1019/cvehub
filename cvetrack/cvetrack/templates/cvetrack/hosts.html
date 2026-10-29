@@ -1,0 +1,12 @@
+{% extends "cvetrack/layout.html" %}{% block page_title %}主機{% endblock %}{% block body %}
+<h1>主機</h1>
+<form class="filters" method="get"><label>主機名稱<input name="q" value="{{ f.q }}"></label>
+<label><span><input type="checkbox" name="all" value="1" {% if f.all == '1' %}checked{% endif %}> 含已移除的主機</span></label><button>篩選</button></form>
+<table><tr><th>主機</th><th>IP</th><th>版本</th><th>Pro</th><th>執行中 kernel</th><th class="num">未解決</th><th class="num">critical／high</th><th class="num">要重開機</th><th>最後同步</th></tr>
+{% for h in page_obj %}<tr><td><a href="{% url 'cvetrack:host' h.id %}">{{ h.hostname }}</a>{% if not h.active %} <span class="tag">已移除</span>{% endif %}</td>
+<td>{{ h.ip }}</td><td>{{ h.release }}</td><td>{{ h.pro_attached|yesno:"是,否,不明" }}</td>
+<td class="muted">{{ h.kernel_version|default:"" }} <span class="muted">（{{ h.get_kernel_status_display }}）</span></td>
+<td class="num">{{ h.open }}</td><td class="num">{{ h.crit }}</td><td class="num">{{ h.reboot }}</td><td class="nowrap">{{ h.last_seen|date:"Y-m-d H:i" }}</td></tr>
+{% empty %}<tr><td colspan="9" class="muted">沒有主機</td></tr>{% endfor %}</table>
+{% include "cvetrack/_pager.html" %}
+{% endblock %}

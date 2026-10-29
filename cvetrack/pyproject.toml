@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cvetrack"
+dynamic = ["version"]
+description = "Ubuntu CVE tracking for hosts managed by Landscape: findings, change events and change tickets (reusable Django app)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = ["Django>=5.2,<6.0", "openpyxl>=3.1"]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-django>=4.9"]
+
+[tool.setuptools.dynamic]
+version = {attr = "cvetrack.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["cvetrack*"]
+
+[tool.setuptools.package-data]
+cvetrack = ["templates/cvetrack/*.html", "static/cvetrack/*"]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "demo.settings"
+pythonpath = [".", "demo"]
+testpaths = ["tests"]

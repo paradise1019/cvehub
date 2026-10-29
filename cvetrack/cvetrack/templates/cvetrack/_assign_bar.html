@@ -1,0 +1,7 @@
+{% if can_operate %}<div class="bar">
+ <label>單號 <input name="number" size="18" placeholder="例如 CHG-2026-1028" {% if ticket %}value="{{ ticket.number }}"{% endif %}></label>
+ <button name="action" value="assign">勾選的掛上單號</button>
+ {% if allow_all %}<button name="all" value="1" data-confirm="把符合目前篩選條件的全部 {{ total }} 筆都掛上這個單號？">符合篩選的全部（{{ total }} 筆）掛上單號</button>{% endif %}
+ {% if allow_unassign %}<button name="action" value="unassign" data-confirm="移除勾選事件的單號？">移除勾選的單號</button>{% endif %}
+ <span class="muted">單號不存在會自動建立變更單；改單號會記在稽核紀錄。</span>
+</div>{% endif %}

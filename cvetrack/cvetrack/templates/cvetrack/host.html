@@ -1,0 +1,23 @@
+{% extends "cvetrack/layout.html" %}{% load cvetrack_tags %}{% block page_title %}{{ host.hostname }}{% endblock %}{% block body %}
+<h1>{{ host.hostname }}{% if not host.active %} <span class="tag">已移除</span>{% endif %}</h1>
+<div class="card"><dl class="kv">
+ <dt>IP／版本</dt><dd>{{ host.ip|default:"—" }}／Ubuntu {{ host.release }}（Pro：{{ host.pro_attached|yesno:"是,否,不明" }}）</dd>
+ <dt>執行中 kernel</dt><dd>{{ host.kernel_release|default:"—" }} {{ host.kernel_version|default:"" }}（{{ host.get_kernel_status_display }}）</dd>
+ <dt>未解決</dt><dd>{% for p in prios %}{% with n=summary|lookup:p %}{% if n != p %}<span class="tag p-{{ p }}">{{ p }} {{ n }}</span> {% endif %}{% endwith %}{% endfor %}{% if not summary %}沒有{% endif %}</dd>
+ <dt>最後同步</dt><dd>{{ host.last_seen|date:"Y-m-d H:i" }}；第一次出現 Run #{{ host.first_run_id|default:"—" }}</dd>
+ {% if tickets %}<dt>變更單（預計主機）</dt><dd>{% for t in tickets %}<a href="{% url 'cvetrack:ticket' t.id %}">{{ t.number }}</a> {% endfor %}</dd>{% endif %}
+</dl></div>
+<div class="tabs"><a href="?tab=events" {% if tab == 'events' %}class="on"{% endif %}>事件時間軸</a><a href="?tab=findings" {% if tab == 'findings' %}class="on"{% endif %}>目前的弱點</a></div>
+{% if tab == 'findings' %}
+<table><tr><th>CVE</th><th>等級</th><th>套件</th><th>已安裝／執行中</th><th>修正版本</th><th>狀態</th><th>要做的事</th><th>第一次發現</th></tr>
+{% for x in page_obj %}<tr><td class="nowrap"><a href="{% url 'cvetrack:cve' x.cve %}">{{ x.cve }}</a></td><td>{% include "cvetrack/_prio.html" with p=x.priority %}</td>
+<td>{{ x.package }}</td><td class="muted">{{ x.installed }}{% if x.running %} 執行中 {{ x.running }}{% endif %}</td><td>{{ x.fixed }}</td>
+<td>{{ status_label|lookup:x.status }}</td><td>{{ action_label|lookup:x.action }}</td><td class="nowrap">{{ x.first_seen|date:"Y-m-d" }}</td></tr>
+{% empty %}<tr><td colspan="8" class="muted">沒有弱點</td></tr>{% endfor %}</table>
+{% else %}
+{% include "cvetrack/_event_filters.html" with hide_host=1 %}
+{% include "cvetrack/_export.html" %}
+{% include "cvetrack/_event_table.html" with rows=page_obj hide_host=1 %}
+{% endif %}
+{% include "cvetrack/_pager.html" %}
+{% endblock %}

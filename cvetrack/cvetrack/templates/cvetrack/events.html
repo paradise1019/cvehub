@@ -1,0 +1,7 @@
+{% extends "cvetrack/layout.html" %}{% block page_title %}事件{% endblock %}{% block body %}
+<h1>事件（所有 Run）</h1>
+{% include "cvetrack/_event_filters.html" with show_run=1 %}
+{% include "cvetrack/_export.html" %}
+{% include "cvetrack/_event_table.html" with rows=page_obj %}
+{% include "cvetrack/_pager.html" %}
+{% endblock %}

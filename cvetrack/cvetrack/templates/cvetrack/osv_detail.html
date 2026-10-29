@@ -1,0 +1,19 @@
+{% extends "cvetrack/layout.html" %}{% load cvetrack_tags %}{% block page_title %}OSV #{{ imp.id }} 差異{% endblock %}{% block body %}
+<h1>OSV #{{ imp.id }} 差異（{{ imp.filename }}）</h1>
+<p>{% if imp.prev_id %}與 #{{ imp.prev_id }} 比較。{% else %}第一份 OSV，沒有差異。{% endif %}
+{% if imp.change_counts %}{% for k, n in imp.change_counts.items %}<a href="?kind={{ k }}">{{ adv_label|lookup:k }} {{ n }}</a>{% if not forloop.last %}、{% endif %}{% endfor %}{% endif %}</p>
+<form class="filters" method="get">
+ <label>差異<select name="kind"><option value="">全部</option>{% for k,l in adv_kinds %}<option value="{{ k }}" {% if f.kind == k %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></label>
+ <label>版本<select name="release"><option value="">全部</option>{% for r in releases %}<option {% if f.release == r %}selected{% endif %}>{{ r }}</option>{% endfor %}</select></label>
+ <label>CVE<input name="cve" value="{{ f.cve }}" size="14"></label>
+ <label>source 套件<input name="source" value="{{ f.source }}" size="14"></label>
+ <label><span><input type="checkbox" name="installed" value="1" {% if f.installed == '1' %}checked{% endif %}> 只看主機有用到的套件</span></label>
+ <button>篩選</button> <a href="?">清除</a>
+</form>
+{% include "cvetrack/_export.html" %}
+<table><tr><th>CVE</th><th>套件庫</th><th>source</th><th>差異</th><th>原值</th><th>新值</th></tr>
+{% for c in page_obj %}<tr><td><a href="{% url 'cvetrack:cve' c.cve %}">{{ c.cve }}</a></td><td>{{ c.ecosystem }}</td><td>{{ c.source }}</td>
+<td>{{ c.get_kind_display }}</td><td class="muted">{{ c.old_value|default_if_none:"" }}</td><td>{{ c.new_value|default_if_none:"" }}</td></tr>
+{% empty %}<tr><td colspan="6" class="muted">沒有差異</td></tr>{% endfor %}</table>
+{% include "cvetrack/_pager.html" %}
+{% endblock %}

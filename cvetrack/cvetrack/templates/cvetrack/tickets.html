@@ -1,0 +1,13 @@
+{% extends "cvetrack/layout.html" %}{% block page_title %}變更單{% endblock %}{% block body %}
+<h1>變更單 {% if can_operate %}<a href="{% url 'cvetrack:ticket_new' %}" style="font-size:.9rem">＋ 新增（先開單）</a>{% endif %}</h1>
+<form class="filters" method="get"><label>單號或標題<input name="q" value="{{ f.q }}"></label><button>搜尋</button></form>
+{% if without_events %}<div class="card warn"><b>已過預計結束時間，卻沒有對應到任何修補事件：</b>
+{% for t in without_events %}<a href="{% url 'cvetrack:ticket' t.id %}">{{ t.number }}</a>（{{ t.planned_end|date:"Y-m-d H:i" }}）{% if not forloop.last %}、{% endif %}{% endfor %}
+<div class="muted">可能是修補沒做成功、主機還沒同步，或單號掛到別張單。打開變更單看「建議對應」。</div></div>{% endif %}
+<table><tr><th>單號</th><th>標題</th><th>預計時間</th><th class="num">事件</th><th class="num">主機</th><th>建立</th></tr>
+{% for t in page_obj %}<tr><td><a href="{% url 'cvetrack:ticket' t.id %}">{{ t.number }}</a></td><td>{{ t.title }}</td>
+<td class="nowrap">{% if t.planned_start %}{{ t.planned_start|date:"Y-m-d H:i" }} ～ {{ t.planned_end|date:"m-d H:i" }}{% endif %}</td>
+<td class="num">{{ t.n }}</td><td class="num">{{ t.hosts_n }}</td><td class="muted">{{ t.created_by }} {{ t.created_at|date:"Y-m-d" }}</td></tr>
+{% empty %}<tr><td colspan="6" class="muted">還沒有變更單</td></tr>{% endfor %}</table>
+{% include "cvetrack/_pager.html" %}
+{% endblock %}

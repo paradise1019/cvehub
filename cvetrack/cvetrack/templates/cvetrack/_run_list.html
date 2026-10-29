@@ -1,0 +1,11 @@
+<table><tr><th>Run</th><th>開始</th><th>觸發</th><th>狀態</th><th>OSV</th><th class="num">主機</th><th class="num">未解決</th><th class="num">新出現</th><th class="num">重新出現</th><th class="num">已解決</th><th class="num">狀態變化</th><th>訊息</th></tr>
+{% for r in runs %}<tr>
+ <td><a href="{% url 'cvetrack:run' r.id %}">#{{ r.id }}</a>{% if r.baseline %} <span class="tag k-initial">基準</span>{% endif %}</td>
+ <td class="nowrap">{{ r.started_at|date:"Y-m-d H:i" }}</td><td>{{ r.get_trigger_display }}</td>
+ <td>{% if r.status == 'failed' %}<span class="tag p-critical">失敗</span>{% else %}{{ r.get_status_display }}{% endif %}</td>
+ <td>{% if r.osv_import_id %}<a href="{% url 'cvetrack:osv' r.osv_import_id %}">#{{ r.osv_import_id }}</a>{% if r.osv_import_id != r.prev_osv_import_id and r.prev_osv_import_id %} <span class="tag k-changed">新</span>{% endif %}{% endif %}</td>
+ <td class="num">{{ r.hosts|default_if_none:"" }}</td><td class="num">{{ r.open_findings|default_if_none:"" }}</td>
+ <td class="num">{{ r.counts.appeared|default:"" }}</td><td class="num">{{ r.counts.reappeared|default:"" }}</td>
+ <td class="num">{{ r.counts.resolved|default:"" }}</td><td class="num">{{ r.counts.changed|default:"" }}</td>
+ <td class="muted">{{ r.message|truncatechars:80 }}</td>
+</tr>{% empty %}<tr><td colspan="12" class="muted">還沒有 Run</td></tr>{% endfor %}</table>

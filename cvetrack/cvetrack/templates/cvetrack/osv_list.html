@@ -1,0 +1,17 @@
+{% extends "cvetrack/layout.html" %}{% load cvetrack_tags %}{% block page_title %}OSV 差異{% endblock %}{% block body %}
+<h1>OSV 匯入與差異</h1>
+<p class="muted">每份 OSV 都和前一份比較（CVE × 套件庫 × source 套件），跟主機無關；對主機的影響看對應的 Run。</p>
+<table><tr><th>#</th><th>檔案</th><th>檔案日期</th><th>匯入時間</th><th>狀態</th><th class="num">CVE</th><th class="num">affected</th><th>與前一份的差異</th></tr>
+{% for i in imports %}<tr><td><a href="{% url 'cvetrack:osv' i.id %}">#{{ i.id }}</a>{% if i.active %} <span class="tag k-resolved">使用中</span>{% endif %}</td>
+<td>{{ i.filename }}</td><td class="nowrap">{{ i.file_mtime|date:"Y-m-d" }}</td><td class="nowrap">{{ i.imported_at|date:"Y-m-d H:i" }}</td>
+<td>{% if i.status == 'failed' %}<span class="tag p-critical">失敗</span> <span class="muted">{{ i.message|truncatechars:120 }}</span>{% else %}{{ i.get_status_display }}{% endif %}</td>
+<td class="num">{{ i.cve_count|default_if_none:"" }}</td><td class="num">{{ i.affected_count|default_if_none:"" }}</td>
+<td>{% if i.change_counts %}{% for k, n in i.change_counts.items %}<a href="{% url 'cvetrack:osv' i.id %}?kind={{ k }}">{{ adv_label|lookup:k }} {{ n }}</a>{% if not forloop.last %}、{% endif %}{% endfor %}{% elif i.status == 'ok' and not i.prev_id %}<span class="muted">第一份</span>{% endif %}</td></tr>
+{% empty %}<tr><td colspan="8" class="muted">還沒有匯入</td></tr>{% endfor %}</table>
+<h2>VEX 匯入</h2>
+<table><tr><th>#</th><th>檔案</th><th>檔案日期</th><th>匯入時間</th><th>狀態</th><th class="num">CVE</th><th class="num">紀錄</th><th>訊息</th></tr>
+{% for i in vex_imports %}<tr><td>#{{ i.id }}{% if i.active %} <span class="tag k-resolved">使用中</span>{% endif %}</td><td>{{ i.filename }}</td>
+<td class="nowrap">{{ i.file_mtime|date:"Y-m-d" }}</td><td class="nowrap">{{ i.imported_at|date:"Y-m-d H:i" }}</td><td>{{ i.get_status_display }}</td>
+<td class="num">{{ i.cve_count|default_if_none:"" }}</td><td class="num">{{ i.row_count|default_if_none:"" }}</td><td class="muted">{{ i.message|truncatechars:120 }}</td></tr>
+{% empty %}<tr><td colspan="8" class="muted">還沒有匯入</td></tr>{% endfor %}</table>
+{% endblock %}

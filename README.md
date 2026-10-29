@@ -10,6 +10,8 @@ Landscape（主機與已安裝套件）＋ kernel API（執行中的 kernel）�
 - Landscape 24.04／26.04 皆可（只用 legacy API 的 `GetComputers`、`GetPackages`）
 - 漏洞資料手動下載、放進來就自動匯入，**可離線使用**
 
+> **cvetrack**（[`cvetrack/`](cvetrack/README.md)）：同樣的比對規則，做成可以裝進既有 Django 專案的 app，另外追蹤每次匯入／同步的**變化**（新公告、釋出修正、已修補、已移除、已重開機…）並對應**變更單號**。cvehub 本身不受影響，兩者各自獨立部署。
+
 ## 1. 需求
 
 | 項目 | 建議 |

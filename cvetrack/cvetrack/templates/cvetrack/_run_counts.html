@@ -1,0 +1,7 @@
+{% with c=r.counts %}<div class="grid">
+ <div class="card"><div><span class="tag k-appeared">新出現</span></div><div class="big"><a href="{% url 'cvetrack:run' r.id %}?kind=appeared" style="color:inherit;text-decoration:none">{{ c.appeared|default:0 }}</a></div></div>
+ <div class="card"><div><span class="tag k-reappeared">重新出現</span></div><div class="big"><a href="{% url 'cvetrack:run' r.id %}?kind=reappeared" style="color:inherit;text-decoration:none">{{ c.reappeared|default:0 }}</a></div></div>
+ <div class="card"><div><span class="tag k-resolved">已解決</span></div><div class="big"><a href="{% url 'cvetrack:run' r.id %}?kind=resolved" style="color:inherit;text-decoration:none">{{ c.resolved|default:0 }}</a></div></div>
+ <div class="card"><div><span class="tag k-changed">狀態變化</span></div><div class="big"><a href="{% url 'cvetrack:run' r.id %}?kind=changed" style="color:inherit;text-decoration:none">{{ c.changed|default:0 }}</a></div></div>
+ <div class="card"><div>未解決</div><div class="big">{{ r.open_findings }}</div></div>
+</div>{% endwith %}

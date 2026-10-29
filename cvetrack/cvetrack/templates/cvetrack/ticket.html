@@ -1,0 +1,31 @@
+{% extends "cvetrack/layout.html" %}{% block page_title %}{{ ticket.number }}{% endblock %}{% block body %}
+<h1>變更單 {{ ticket.number }} {% if can_operate %}<a href="{% url 'cvetrack:ticket_edit' ticket.id %}" style="font-size:.9rem">編輯</a>{% endif %}</h1>
+<div class="card"><dl class="kv">
+ <dt>標題</dt><dd>{{ ticket.title|default:"—" }}</dd>
+ <dt>說明</dt><dd>{{ ticket.description|linebreaksbr|default:"—" }}</dd>
+ <dt>預計時間</dt><dd>{% if ticket.planned_start %}{{ ticket.planned_start|date:"Y-m-d H:i" }} ～ {{ ticket.planned_end|date:"Y-m-d H:i" }}{% else %}—{% endif %}</dd>
+ <dt>預計主機</dt><dd>{% for h in planned_hosts %}<a href="{% url 'cvetrack:host' h.id %}">{{ h.hostname }}</a> {% empty %}—{% endfor %}</dd>
+ <dt>建立</dt><dd>{{ ticket.created_by }} {{ ticket.created_at|date:"Y-m-d H:i" }}</dd>
+</dl></div>
+
+{% if suggestions_count %}<h2>建議對應（{{ suggestions_count }} 筆）</h2>
+<p class="muted">預計主機在預計時間內的修補事件，還沒有單號。確認是這張單做的再掛上。</p>
+<form method="post" action="{% url 'cvetrack:ticket_assign' %}">{% csrf_token %}
+<input type="hidden" name="next" value="{{ request.get_full_path }}">
+{% include "cvetrack/_event_table.html" with rows=suggestions selectable=1 %}
+{% include "cvetrack/_assign_bar.html" %}
+</form>{% endif %}
+
+<h2>這張單修掉的弱點（{{ page_obj.paginator.count }} 筆）</h2>
+{% if by_host %}<table class="auto"><tr><th>主機</th><th class="num">事件</th><th class="num">CVE</th></tr>
+{% for b in by_host %}<tr><td>{{ b.host__hostname }}</td><td class="num">{{ b.n }}</td><td class="num">{{ b.cves }}</td></tr>{% endfor %}</table>{% endif %}
+{% include "cvetrack/_export.html" %}
+<form method="post" action="{% url 'cvetrack:ticket_assign' %}">{% csrf_token %}
+<input type="hidden" name="next" value="{{ request.get_full_path }}">
+{% include "cvetrack/_event_table.html" with rows=page_obj selectable=can_operate %}
+{% include "cvetrack/_pager.html" %}
+{% if can_operate and page_obj.paginator.count %}<div class="bar"><input type="hidden" name="number" value="{{ ticket.number }}">
+<button name="action" value="unassign" data-confirm="移除勾選事件的單號？">移除勾選的單號</button>
+<span class="muted">要改到其他單號：到「待補單號」用單號篩選後重新掛。</span></div>{% endif %}
+</form>
+{% endblock %}

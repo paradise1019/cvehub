@@ -1,0 +1,14 @@
+{% extends "cvetrack/layout.html" %}{% block page_title %}待補單號{% endblock %}{% block body %}
+<h1>待補單號</h1>
+<p class="muted">已修補、已移除、已重開機是人做的變更，必須有變更單號；「主機套件變更」造成的新弱點可以選擇補單號。
+超過 {{ cfg.UNTICKETED_WARN_DAYS }} 天還沒補的列紅色。</p>
+{% include "cvetrack/_event_filters.html" with show_run=1 kinds=None %}
+{% include "cvetrack/_export.html" %}
+<form method="post" action="{% url 'cvetrack:ticket_assign' %}">{% csrf_token %}
+<input type="hidden" name="next" value="{{ request.get_full_path }}">
+{% for k, v in f.items %}<input type="hidden" name="f_{{ k }}" value="{{ v }}">{% endfor %}
+{% include "cvetrack/_event_table.html" with rows=page_obj selectable=1 %}
+{% include "cvetrack/_pager.html" %}
+{% include "cvetrack/_assign_bar.html" with allow_all=1 %}
+</form>
+{% endblock %}

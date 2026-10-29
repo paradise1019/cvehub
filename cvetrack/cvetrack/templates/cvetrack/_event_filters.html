@@ -1,0 +1,15 @@
+<form class="filters" method="get">
+ {% if show_run %}<label>Run<input name="run" value="{{ f.run }}" size="5"></label>{% endif %}
+ <label>事件<select name="kind"><option value="">全部</option>{% for k,l in kinds %}<option value="{{ k }}" {% if f.kind == k %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></label>
+ <label>原因<select name="cause"><option value="">全部</option>{% for k,l in causes %}<option value="{{ k }}" {% if f.cause == k %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></label>
+ <label>等級（以上）<select name="priority"><option value="">全部</option>{% for p in prios %}<option {% if f.priority == p %}selected{% endif %}>{{ p }}</option>{% endfor %}</select></label>
+ {% if not hide_host %}<label>主機<input name="host" value="{{ f.host }}" size="14"></label>{% endif %}
+ <label>CVE<input name="cve" value="{{ f.cve }}" size="14"></label>
+ <label>套件<input name="package" value="{{ f.package }}" size="12"></label>
+ <label>單號（none＝沒有）<input name="ticket" value="{{ f.ticket }}" size="12"></label>
+ <label>從<input type="date" name="date_from" value="{{ f.date_from }}"></label>
+ <label>到<input type="date" name="date_to" value="{{ f.date_to }}"></label>
+ <label>例外<select name="excepted"><option value="">全部</option><option value="0" {% if f.excepted == '0' %}selected{% endif %}>不含例外</option><option value="1" {% if f.excepted == '1' %}selected{% endif %}>只看例外</option></select></label>
+ {% if f.tab %}<input type="hidden" name="tab" value="{{ f.tab }}">{% endif %}
+ <button>篩選</button> <a href="?">清除</a>
+</form>

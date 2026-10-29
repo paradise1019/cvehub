@@ -1,0 +1,8 @@
+{% extends "cvetrack/layout.html" %}{% block page_title %}{% if ticket %}編輯 {{ ticket.number }}{% else %}新增變更單{% endif %}{% endblock %}{% block body %}
+<h1>{% if ticket %}編輯 {{ ticket.number }}{% else %}新增變更單{% endif %}</h1>
+<p class="muted">先開單：填預計主機與預計時間，之後同步到這些主機在這段時間內的修補事件，會列在變更單的「建議對應」，確認後才掛上。</p>
+<form method="post" class="card">{% csrf_token %}
+<table class="auto">{{ form.as_table }}</table>
+<p><button>儲存</button> <a href="{% if ticket %}{% url 'cvetrack:ticket' ticket.id %}{% else %}{% url 'cvetrack:tickets' %}{% endif %}">取消</a></p>
+</form>
+{% endblock %}

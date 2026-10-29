@@ -1,0 +1,6 @@
+{% extends "cvetrack/layout.html" %}{% block page_title %}Run{% endblock %}{% block body %}
+<h1>Run（每次匯入／同步）</h1>
+<p class="muted">每次 Run 都和上一次成功的 Run 比較，差異記成事件。點進去看這次變了什麼。</p>
+{% include "cvetrack/_run_list.html" with runs=page_obj %}
+{% include "cvetrack/_pager.html" %}
+{% endblock %}

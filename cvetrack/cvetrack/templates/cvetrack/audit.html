@@ -1,0 +1,7 @@
+{% extends "cvetrack/layout.html" %}{% block page_title %}稽核紀錄{% endblock %}{% block body %}
+<h1>稽核紀錄</h1>
+<table><tr><th>時間</th><th>帳號</th><th>IP</th><th>動作</th><th>內容</th></tr>
+{% for a in page_obj %}<tr><td class="nowrap">{{ a.ts|date:"Y-m-d H:i:s" }}</td><td>{{ a.user }}</td><td>{{ a.ip }}</td><td>{{ a.action }}</td><td>{{ a.detail }}</td></tr>
+{% empty %}<tr><td colspan="5" class="muted">沒有紀錄</td></tr>{% endfor %}</table>
+{% include "cvetrack/_pager.html" %}
+{% endblock %}

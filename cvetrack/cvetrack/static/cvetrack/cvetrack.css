@@ -1,0 +1,38 @@
+/* cvetrack：所有規則都在 .ct 底下，換成原專案的 base 樣板時不會影響其他頁面 */
+.ct{font-family:system-ui,"Noto Sans TC",sans-serif;color:#1f2328;font-size:15px}
+.ct-page{margin:0;background:#f6f8fa}
+.ct header.ct-top{background:#24292f;color:#fff;padding:.55rem 1rem;display:flex;gap:1rem;align-items:center;flex-wrap:wrap}
+.ct header.ct-top a{color:#fff;text-decoration:none} .ct header.ct-top a.on{border-bottom:2px solid #fff}
+.ct header.ct-top b{font-size:1.1rem} .ct .ct-badge{background:#cf222e;color:#fff;border-radius:9px;padding:0 .4rem;font-size:.75rem}
+.ct main{padding:1rem;max-width:1500px;margin:auto}
+.ct h1{font-size:1.4rem;margin:.2rem 0 .8rem} .ct h2{font-size:1.1rem;margin:1.2rem 0 .5rem}
+.ct a{color:#0969da}
+.ct table{border-collapse:collapse;width:100%;background:#fff;font-size:.88rem}
+.ct th,.ct td{border:1px solid #d0d7de;padding:.28rem .5rem;text-align:left;vertical-align:top}
+.ct th{background:#eaeef2}
+.ct table.auto{width:auto}
+.ct .card{background:#fff;border:1px solid #d0d7de;border-radius:6px;padding:.8rem 1rem;margin-bottom:1rem}
+.ct .warn{background:#fff8c5;border-color:#d4a72c} .ct .err{background:#ffebe9;border-color:#ff8182}
+.ct .ok{background:#dafbe1;border-color:#4ac26b} .ct .info{border-left:4px solid #0969da}
+.ct .tag{padding:0 .4rem;border-radius:4px;font-size:.8rem;white-space:nowrap;display:inline-block}
+.ct .p-critical{background:#cf222e;color:#fff}.ct .p-high{background:#fb8500;color:#fff}.ct .p-medium{background:#fff1b8}
+.ct .p-low{background:#ddf4ff}.ct .p-negligible{background:#eee}
+.ct .k-initial{background:#eaeef2}.ct .k-appeared{background:#ffd8a8}.ct .k-reappeared{background:#cf222e;color:#fff}
+.ct .k-resolved{background:#d3f9d8}.ct .k-changed{background:#ddf4ff}
+.ct .need{color:#cf222e;font-weight:600}
+.ct .num{text-align:right} .ct .muted{color:#656d76;font-size:.85rem} .ct .nowrap{white-space:nowrap}
+.ct .grid{display:flex;gap:1rem;flex-wrap:wrap} .ct .grid .card{flex:1;min-width:150px;text-align:center}
+.ct .big{font-size:1.9rem;font-weight:600}
+.ct form.inline{display:inline} .ct input,.ct select,.ct button,.ct textarea{font:inherit;padding:.2rem .4rem}
+.ct form.filters{display:flex;gap:.5rem;flex-wrap:wrap;align-items:end;margin-bottom:.6rem}
+.ct form.filters label{display:flex;flex-direction:column;font-size:.8rem;color:#656d76}
+.ct .pager{margin:.6rem 0;display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}
+.ct .pager a,.ct .pager b{padding:.1rem .45rem;border:1px solid #d0d7de;border-radius:4px;background:#fff;text-decoration:none}
+.ct .pager b{background:#0969da;color:#fff;border-color:#0969da}
+.ct .tabs{display:flex;gap:.3rem;margin:.6rem 0} .ct .tabs a{padding:.2rem .7rem;border:1px solid #d0d7de;border-radius:4px 4px 0 0;text-decoration:none;background:#fff}
+.ct .tabs a.on{background:#0969da;color:#fff}
+.ct .bar{position:sticky;bottom:0;background:#fff;border:1px solid #d0d7de;padding:.6rem;display:flex;gap:.6rem;align-items:center;flex-wrap:wrap}
+.ct ul.msgs{list-style:none;padding:0;margin:0 0 1rem} .ct ul.msgs li{padding:.5rem .8rem;border-radius:6px;margin-bottom:.3rem;border:1px solid #d0d7de;background:#fff}
+.ct ul.msgs li.success{background:#dafbe1} .ct ul.msgs li.error{background:#ffebe9} .ct ul.msgs li.warning{background:#fff8c5}
+.ct .errorlist{color:#cf222e;margin:0;padding-left:1rem}
+.ct dl.kv{display:grid;grid-template-columns:max-content 1fr;gap:.2rem 1rem;margin:0} .ct dl.kv dt{color:#656d76}

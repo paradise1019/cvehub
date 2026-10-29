@@ -1,0 +1,20 @@
+{% extends "cvetrack/layout.html" %}{% load cvetrack_tags %}{% block page_title %}{{ cve }}{% endblock %}{% block body %}
+<h1>{{ cve }} {% if vuln %}{% include "cvetrack/_prio.html" with p=vuln.priority %}{% endif %}</h1>
+{% if vuln %}<div class="card"><dl class="kv"><dt>公開日期</dt><dd>{{ vuln.published|slice:":10" }}</dd><dt>CVSS</dt><dd class="muted">{{ vuln.cvss|default:"—" }}</dd>
+<dt>說明</dt><dd>{{ vuln.details|linebreaksbr }}</dd><dt>Ubuntu</dt><dd><a href="https://ubuntu.com/security/{{ cve }}" target="_blank" rel="noopener noreferrer">ubuntu.com/security/{{ cve }}</a></dd></dl></div>
+{% else %}<div class="card warn">使用中的 OSV 沒有這個 CVE（可能已撤回）。</div>{% endif %}
+<h2>目前受影響的主機（{{ open_count }}）</h2>
+<table><tr><th>主機</th><th>套件</th><th>已安裝／執行中</th><th>修正版本</th><th>狀態</th><th>要做的事</th><th>第一次發現</th></tr>
+{% for x in open %}<tr><td><a href="{% url 'cvetrack:host' x.host_id %}">{{ x.host.hostname }}</a></td><td>{{ x.package }}</td>
+<td class="muted">{{ x.installed }}{% if x.running %} 執行中 {{ x.running }}{% endif %}</td><td>{{ x.fixed }}</td><td>{{ status_label|lookup:x.status }}</td>
+<td>{{ action_label|lookup:x.action }}</td><td class="nowrap">{{ x.first_seen|date:"Y-m-d" }}</td></tr>
+{% empty %}<tr><td colspan="7" class="muted">目前沒有主機受影響</td></tr>{% endfor %}</table>
+<h2>事件時間軸</h2>
+{% include "cvetrack/_event_table.html" with rows=page_obj %}
+{% include "cvetrack/_pager.html" %}
+<h2>OSV 差異紀錄</h2>
+<table><tr><th>OSV</th><th>套件庫</th><th>source</th><th>差異</th><th>原值</th><th>新值</th></tr>
+{% for c in adv %}<tr><td><a href="{% url 'cvetrack:osv' c.imp_id %}">#{{ c.imp_id }}</a> <span class="muted">{{ c.imp.file_mtime|date:"Y-m-d" }}</span></td><td>{{ c.ecosystem }}</td><td>{{ c.source }}</td>
+<td>{{ c.get_kind_display }}</td><td class="muted">{{ c.old_value|default_if_none:"" }}</td><td>{{ c.new_value|default_if_none:"" }}</td></tr>
+{% empty %}<tr><td colspan="6" class="muted">沒有差異紀錄</td></tr>{% endfor %}</table>
+{% endblock %}

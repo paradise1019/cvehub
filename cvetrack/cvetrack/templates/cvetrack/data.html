@@ -1,0 +1,20 @@
+{% extends "cvetrack/layout.html" %}{% block page_title %}資料匯入{% endblock %}{% block body %}
+<h1>資料匯入</h1>
+<div class="card info">
+<p>上傳 Canonical 的 <b>osv-all.tar.xz</b>（<code>https://security-metadata.canonical.com/osv/osv-all.tar.xz</code>）或 <b>vex-all.tar.xz</b>（<code>…/vex/vex-all.tar.xz</code>）。
+檔案會放進放檔目錄，排程（<code>cvetrack_tick</code>）幾分鐘內匯入，匯入完自動比對並產生一個 Run。</p>
+<p class="muted">也可以直接把檔案複製到 <code>{{ inbox }}</code>。比對的 Ubuntu 版本：{{ cfg.UBUNTU_RELEASES|join:", " }}。</p>
+<form method="post" enctype="multipart/form-data">{% csrf_token %}<input type="file" name="file" accept=".xz" required> <button>上傳</button></form>
+</div>
+{% if pending %}<div class="card warn">等待匯入：{{ pending|join:"、" }}</div>{% endif %}
+<h2>OSV</h2>
+<table><tr><th>#</th><th>檔案</th><th>檔案日期</th><th>匯入時間</th><th>狀態</th><th class="num">CVE</th><th>訊息</th></tr>
+{% for i in imports %}<tr><td><a href="{% url 'cvetrack:osv' i.id %}">#{{ i.id }}</a>{% if i.active %} <span class="tag k-resolved">使用中</span>{% endif %}</td><td>{{ i.filename }}</td>
+<td>{{ i.file_mtime|date:"Y-m-d" }}</td><td>{{ i.imported_at|date:"Y-m-d H:i" }}</td><td>{{ i.get_status_display }}</td><td class="num">{{ i.cve_count|default_if_none:"" }}</td><td class="muted">{{ i.message|truncatechars:150 }}</td></tr>
+{% empty %}<tr><td colspan="7" class="muted">還沒有匯入</td></tr>{% endfor %}</table>
+<h2>VEX</h2>
+<table><tr><th>#</th><th>檔案</th><th>檔案日期</th><th>匯入時間</th><th>狀態</th><th class="num">CVE</th><th>訊息</th></tr>
+{% for i in vex_imports %}<tr><td>#{{ i.id }}{% if i.active %} <span class="tag k-resolved">使用中</span>{% endif %}</td><td>{{ i.filename }}</td>
+<td>{{ i.file_mtime|date:"Y-m-d" }}</td><td>{{ i.imported_at|date:"Y-m-d H:i" }}</td><td>{{ i.get_status_display }}</td><td class="num">{{ i.cve_count|default_if_none:"" }}</td><td class="muted">{{ i.message|truncatechars:150 }}</td></tr>
+{% empty %}<tr><td colspan="7" class="muted">還沒有匯入</td></tr>{% endfor %}</table>
+{% endblock %}
