@@ -85,20 +85,30 @@ def update_user(con, uid, role=None, active=None):
                     (new_role, new_active, uid))
 
 
-def verify_login(con, username, password):
-    """回傳 (user 或 None, 錯誤訊息)。錯誤訊息不透露帳號是否存在"""
+FAIL_MSG = "帳號或密碼錯誤；連續錯誤 %d 次會暫時鎖定 %d 分鐘" % (LOCK_AFTER, LOCK_MINUTES)
+
+
+def verify_login(con, username, password, reasons=None):
+    """回傳 (user 或 None, 錯誤訊息)；reasons 是 list 時，把真正的失敗原因加進去（只寫稽核紀錄，不給使用者看）。
+
+    不透露帳號是否存在、是否被鎖定：所有失敗都回同一句話，而且都會比對一次密碼雜湊（花的時間一樣）。
+    是否鎖定只記在資料庫與稽核紀錄，管理員在帳號管理頁看得到，可重設密碼解除"""
     u = con.execute("SELECT * FROM users WHERE lower(username)=lower(?)", ((username or "").strip(),)).fetchone()
+    ok = check_password_hash(u["password_hash"] if u else _DUMMY_HASH, password or "")
+    why = reasons.append if reasons is not None else (lambda _: None)
     if not u or not u["active"]:
-        check_password_hash(_DUMMY_HASH, password or "")
-        return None, "帳號或密碼錯誤"
+        why("帳號不存在" if not u else "帳號已停用")
+        return None, FAIL_MSG
     if u["locked_until"] and u["locked_until"] > _now():
-        return None, "錯誤次數太多，帳號暫時鎖定，請 %d 分鐘後再試" % LOCK_MINUTES
-    if not check_password_hash(u["password_hash"], password or ""):
+        why("帳號鎖定中（到 %s）" % u["locked_until"])
+        return None, FAIL_MSG
+    if not ok:
         n = (u["failed_count"] or 0) + 1
         locked = (datetime.datetime.now() + datetime.timedelta(minutes=LOCK_MINUTES)).isoformat(timespec="seconds") if n >= LOCK_AFTER else None
         with con:
             con.execute("UPDATE users SET failed_count=?, locked_until=? WHERE id=?", (0 if locked else n, locked, u["id"]))
-        return None, ("錯誤次數太多，帳號暫時鎖定，請 %d 分鐘後再試" % LOCK_MINUTES) if locked else "帳號或密碼錯誤"
+        why("密碼錯誤（第 %d 次）%s" % (n, "，帳號鎖定到 %s" % locked if locked else ""))
+        return None, FAIL_MSG
     with con:
         con.execute("UPDATE users SET failed_count=0, locked_until=NULL, last_login=? WHERE id=?", (_now(), u["id"]))
     return get_user(con, u["id"]), ""

@@ -9,6 +9,7 @@ import shutil
 import tarfile
 
 from .config import Config
+from .kernel import kernel_variant
 
 log = logging.getLogger(__name__)
 
@@ -32,17 +33,12 @@ def wanted_ecosystems(releases):
     return eco
 
 
-def _kernel_variant(src):
-    """雲端／OEM kernel 變體（linux-aws、linux-azure…）：USN 修正日期不收（資料量大，報表也不列）"""
-    return src.startswith("linux-") and not src.startswith("linux-hwe-") and src != "linux-firmware"
-
-
 def _usn_rows(d, wanted):
     """USN：哪一天、以哪個版本修正了哪些 CVE（輸出報表「截至期末」判斷用）"""
     cves = [u.replace("UBUNTU-", "") for u in d.get("upstream", []) if "CVE-" in u]
     for a in d.get("affected", []):
         eco, src = a["package"]["ecosystem"], a["package"]["name"]
-        if eco not in wanted or _kernel_variant(src):
+        if eco not in wanted or kernel_variant(src):     # 雲端／OEM kernel 變體不收（資料量大，報表也不列）
             continue
         fixed = next((ev["fixed"] for rng in a.get("ranges", []) for ev in rng.get("events", []) if "fixed" in ev), None)
         if fixed:
@@ -101,8 +97,9 @@ SQL = {"vuln": "INSERT OR REPLACE INTO vuln(cve,priority,cvss,published,details)
        "usn": "INSERT OR REPLACE INTO usn_fix(cve,ecosystem,source,fixed,usn,published) VALUES (?,?,?,?,?,?)"}
 BATCH = 50000
 # 資料格式版本：匯入內容有變時加一，舊資料庫會用保存的 OSV 檔自動重匯
-# 1＝0.4.0 加 details；2＝0.5.0 收錄所有 CVE（含沒有指定版本套件的）；3＝0.7.0 加 USN 修正日期
-FORMAT = 3
+# 1＝0.4.0 加 details；2＝0.5.0 收錄所有 CVE（含沒有指定版本套件的）；3＝0.7.0 加 USN 修正日期；
+# 4＝0.7.1 沒有日期的 USN 不再蓋掉有日期的
+FORMAT = 4
 
 
 def import_file(con, path):
@@ -124,7 +121,8 @@ def import_file(con, path):
             for kind, row in iter_osv(path, releases):
                 if kind == "usn":
                     k = row[:3]
-                    if k not in first_fix or (row[5], row[4]) < (first_fix[k][5], first_fix[k][4]):
+                    # 最早的 USN；沒有日期的排最後（不能蓋掉有日期的）
+                    if k not in first_fix or (row[5] or "9999", row[4]) < (first_fix[k][5] or "9999", first_fix[k][4]):
                         first_fix[k] = row
                     continue
                 if kind == "affected":

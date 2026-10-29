@@ -15,6 +15,10 @@ RUN pip install --no-cache-dir --disable-pip-version-check --index-url "${PIP_IN
 
 COPY cvehub ./cvehub
 COPY tests ./tests
+# 程式指紋（cvehub/＋requirements.txt＋Dockerfile 的 sha256，由 scripts/upgrade.sh 建置時帶入）：
+# 回復時用來確認沿用的 image 就是那份程式建的；自己 build 沒帶就是空的，回復時一律重建
+ARG CODE_FP=
+LABEL org.cvehub.code-fp=$CODE_FP
 
 # 以非 root 執行；/data 放資料庫、放檔目錄、報表
 RUN useradd --system --uid 10001 --home /data cvehub && mkdir -p /data /config && chown cvehub /data

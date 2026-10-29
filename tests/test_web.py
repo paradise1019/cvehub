@@ -219,11 +219,25 @@ class AuthTest(unittest.TestCase):
 
     def test_login_lockout_and_open_redirect(self):
         anon = self.app.test_client()
-        for _ in range(auth.LOCK_AFTER - 1):
-            self.assertIn("帳號或密碼錯誤", login(anon, "admin", "wrong").get_data(as_text=True))
-        self.assertIn("暫時鎖定", login(anon, "admin", "wrong").get_data(as_text=True))
-        self.assertIn("暫時鎖定", login(anon, "admin", "correct horse battery").get_data(as_text=True))   # 鎖定中密碼對也不行
-        self.assertIn("帳號或密碼錯誤", login(anon, "nobody", "x").get_data(as_text=True))                # 不透露帳號是否存在
+        for _ in range(auth.LOCK_AFTER):
+            self.assertIn(auth.FAIL_MSG, login(anon, "admin", "wrong").get_data(as_text=True))
+        self.assertTrue(self.env.con.execute("SELECT locked_until FROM users WHERE username='admin'").fetchone()[0])
+        r = login(anon, "admin", "correct horse battery")                                   # 鎖定中密碼對也不行
+        self.assertEqual(r.status_code, 200)
+        self.assertIn(auth.FAIL_MSG, r.get_data(as_text=True))
+        self.assertIn(auth.FAIL_MSG, login(anon, "nobody", "x").get_data(as_text=True))     # 訊息都一樣，不透露帳號是否存在／被鎖定
+        # 稽核紀錄要看得出真正原因（鎖定的時間點、鎖定中仍在嘗試）
+        details = [r[0] for r in self.env.con.execute("SELECT detail FROM audit_log WHERE action='login-failed' ORDER BY id")]
+        self.assertIn("帳號鎖定到", details[auth.LOCK_AFTER - 1])
+        self.assertIn("帳號鎖定中", details[auth.LOCK_AFTER])
+        self.assertIn("帳號不存在", details[-1])
+        self.env.con.execute("UPDATE users SET active=0, locked_until=NULL WHERE username='admin'")
+        self.env.con.commit()
+        login(anon, "admin", "correct horse battery")
+        self.assertEqual(self.env.con.execute("SELECT detail FROM audit_log WHERE action='login-failed' ORDER BY id DESC").fetchone()[0],
+                         "帳號已停用")
+        self.env.con.execute("UPDATE users SET active=1 WHERE username='admin'")
+        self.env.con.commit()
         b = self.app.test_client()
         self.env.con.execute("UPDATE users SET locked_until=NULL")
         self.env.con.commit()
@@ -233,6 +247,43 @@ class AuthTest(unittest.TestCase):
         r = b.post("/login", data={"csrf": tok, "username": "admin", "password": "correct horse battery", "next": "https://evil.example.com/"},
                    headers={"Origin": "http://localhost"})
         self.assertEqual(r.headers["Location"], "/")                  # 不導到外部網址
+
+    def test_unauthenticated_post_body_not_read(self):
+        from flask import Request
+        parsed = []
+
+        class Spy(Request):                       # 記錄哪些請求真的解析了表單內容
+            def _load_form_data(self):
+                parsed.append(self.path)
+                return super()._load_form_data()
+        self.app.request_class = Spy
+        anon = self.app.test_client()
+        r = anon.post("/data", data={"kind": "osv", "file": (io.BytesIO(b"x" * 1024 * 1024), "a.tar.xz")},
+                      headers={"Origin": "http://localhost"})
+        self.assertEqual(r.status_code, 401)                                                  # 先擋未登入
+        self.assertEqual(parsed, [])                                                          # 上傳內容完全沒被解析
+        anon.get("/login")
+        r = anon.post("/login", data={"username": "a", "password": "b" * 20000}, headers={"Origin": "http://localhost"})
+        self.assertEqual(r.status_code, 413)                                                  # 登入表單太大不讀
+        class Counting(io.BytesIO):              # 記錄伺服器實際從請求讀了多少位元組
+            read_total = 0
+
+            def read(self, n=-1):
+                b = super().read(n)
+                Counting.read_total += len(b)
+                return b
+
+            def readline(self, n=-1):
+                b = super().readline(n)
+                Counting.read_total += len(b)
+                return b
+        body = b"username=a&password=" + b"b" * 400000                                         # chunked：沒有 Content-Length
+        r = anon.post("/login", input_stream=Counting(body), content_type="application/x-www-form-urlencoded",
+                      headers={"Origin": "http://localhost", "Transfer-Encoding": "chunked"},
+                      environ_overrides={"wsgi.input_terminated": True})
+        self.assertIn(r.status_code, (400, 413))
+        from cvehub import web
+        self.assertLessEqual(Counting.read_total, web.LOGIN_MAX_BODY + 4096)                    # 最多只讀到上限附近
 
     def test_viewer_is_read_only(self):
         auth.create_user(self.env.con, "boss", "viewer-password-123", "viewer")

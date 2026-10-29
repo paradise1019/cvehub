@@ -7,7 +7,8 @@
 - 不受影響：主機有裝這個套件，但官方狀態是 Fixed（且主機已是修正版本）、Not affected 或 Not in release
 """
 from .config import PRIO, Config
-from .period import cell_text, host_sources, kernel_variant, resolve
+from .kernel import kernel_variant
+from .period import cell_text, host_sources, resolve
 from .sync import active_exceptions, excepted
 from .vex_import import LABEL, RANK, UNRESOLVED, status_for
 

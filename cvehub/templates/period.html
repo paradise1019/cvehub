@@ -20,21 +20,54 @@
 kernel 只列 linux、各版本最新的 HWE 與主機上有裝的 HWE（雲端／OEM 變體不列）。
 {% if not have_vex %}<b>尚未匯入 VEX：狀態只分「已修正／受影響」。</b>{% endif %}</p></details>
 
-<h3>統計 <span class="muted">（以 CVE 計；一個 CVE 在某版本有多個套件時，取最需要注意的狀態；點數字看明細）</span></h3>
-<table class="stat"><tr><th class="lv">等級</th><th class="rel">版本</th><th class="cnt">CVE 數</th>
+{% set e = summary.executive %}
+<div class="card" style="border-left:4px solid #cf222e">
+<h3 style="margin-top:0">主管摘要 <span class="muted">（{{ f.from }}～{{ f.to }} 公開的 CVE；狀態截至 {{ f.to }}）</span></h3>
+<p style="font-size:1.05rem">{{ e.headline }}</p>
+<div class="grid" style="margin:.6rem 0">
+ <div class="card"><div class="muted">{{ e.top_label }} 適用項目</div><div class="big">{{ e.cards.applicable }}</div></div>
+ <div class="card"><div class="muted">官方已有修正（可處理）</div><div class="big" style="color:#1a7f37">{{ e.cards.fixed }}</div></div>
+ <div class="card"><div class="muted">期末時尚未修正</div><div class="big" style="color:#cf222e">{{ e.cards.open }}</div>{% if e.cards.later %}<div class="muted">其中 {{ e.cards.later }} 個期末後已釋出修正</div>{% endif %}</div>
+ <div class="card"><div class="muted">不受影響</div><div class="big" style="color:#656d76">{{ e.cards.not_affected }}</div></div>
+</div>
+<p class="muted" style="margin:.2rem 0">數字卡只算 {{ e.top_label }}，{{ e.matrix|length }} 個版本合計（同一個 CVE 在不同版本分開計）；適用＝已有修正＋尚未修正＋不受影響。</p>
+<b>尚未解決／適用此版本</b>{% if summary.prev_range %} <span class="muted">（▲▼＝和上一期 {{ summary.prev_range[0] }}～{{ summary.prev_range[1] }} 比較）</span>{% endif %}
+<table class="stat" style="margin:.4rem 0 .8rem"><tr><th class="rel">Ubuntu</th>{% for lv in summary.levels %}<th class="st" style="width:13em"><span class="tag p-{{ lv }}">{{ lv }}</span></th>{% endfor %}</tr>
+{% for m in e.matrix %}<tr><td class="rel"><b>{{ m.release }}</b></td>
+{% for c in m.cells %}<td class="n" title="kernel {{ c.kernel_open }}、其他套件 {{ c.other_open }}；已修正 {{ c.fixed }}"
+ {% if c.open and c.level == 'critical' %}style="background:#ffb3ad"{% elif c.open and c.level == 'high' %}style="background:#ffd8a8"{% endif %}>
+<span class="nowrap"><b>{{ c.open }}</b> ／ {{ c.applicable }}{% if c.delta %} <span class="muted">{{ '▲' if c.delta > 0 else '▼' }}{{ c.delta|abs }}</span>{% endif %}</span></td>{% endfor %}</tr>{% endfor %}
+</table>
+<b>要做的事</b>
+<table style="width:auto;margin-top:.4rem"><tr><th>Ubuntu</th><th>處理方式</th><th class="num">可解決／涉及的 CVE 數（{{ summary.levels|join('、') }}）</th></tr>
+{% for a in e.actions %}<tr{% if a.kind == 'track' %} class="muted"{% endif %}><td class="nowrap">{{ a.release }}</td><td>{{ a.what }}</td><td class="num">{{ a.count }}</td></tr>{% endfor %}
+</table></div>
+
+<h3>統計：版本 × 等級 × 類別 <span class="muted">（以 CVE 計；適用＝扣掉「版本無此套件」與「官方無紀錄」；已修正＝期末前；尚未解決含期末後才修正）</span></h3>
+<table class="stat"><tr><th class="rel">Ubuntu</th><th class="lv">等級</th><th class="rel">類別</th><th class="cnt">適用此版本</th><th class="cnt">不受影響</th><th class="cnt">已修正</th><th class="cnt">其中日期不明</th><th class="cnt">尚未解決</th></tr>
+{% for col, rel in releases %}{% for lv in summary.levels %}{% for kind, kl in kinds %}{% set c = summary.overview[(col, lv, kind)] %}
+<tr>{% if loop.first and lv == summary.levels[0] %}<td class="rel" rowspan="{{ summary.levels|length * 2 }}"><b>{{ rel }}</b></td>{% endif %}
+{% if loop.first %}<td class="lv" rowspan="2"><span class="tag p-{{ lv }}">{{ lv }}</span></td>{% endif %}
+<td class="rel">{{ kl }}</td><td class="cnt">{{ c.applicable }}</td><td class="cnt">{{ c.not_affected }}</td><td class="cnt">{{ c.fixed }}</td><td class="cnt muted">{{ c.nodate }}</td><td class="cnt"><b>{{ c.open }}</b></td></tr>
+{% endfor %}{% endfor %}{% endfor %}
+</table>
+
+<details class="card" style="margin-top:1rem"><summary><b>狀態明細</b>（每個官方狀態的 CVE 數；點數字看明細）</summary>
+<table class="stat" style="margin-top:.5rem"><tr><th class="rel">版本</th><th class="lv">等級</th><th class="cnt" title="該等級本期全部 CVE，含與此版本無關的">本期 CVE</th>
 {% for c in summary.statuses %}<th class="st s-{{ c }}" title="{{ label_en[c] }}">{{ label[c] }}</th>{% endfor %}</tr>
-{% for lv in summary.levels %}{% set s = summary.by_level[lv] %}{% for col, rel in releases %}
-<tr>{% if loop.first %}<td class="lv" rowspan="{{ releases|length }}"><span class="tag p-{{ lv }}">{{ lv }}</span></td>{% endif %}<td class="rel">Ubuntu {{ rel }}</td>
-{% if loop.first %}<td class="cnt" rowspan="{{ releases|length }}">{{ s.cves }}</td>{% endif %}
+{% for col, rel in releases %}{% for lv in summary.levels %}{% set s = summary.by_level[lv] %}
+<tr>{% if loop.first %}<td class="rel" rowspan="{{ summary.levels|length }}"><b>{{ rel }}</b></td>{% endif %}<td class="lv"><span class="tag p-{{ lv }}">{{ lv }}</span></td>
+<td class="cnt">{{ s.cves }}</td>
 {% for c in summary.statuses %}<td class="n">{% if s[col][c] %}<a href="{{ url_for('period_report', **dict(f, status=c)) }}">{{ s[col][c] }}</a>{% else %}<span class="muted">0</span>{% endif %}</td>{% endfor %}</tr>
 {% endfor %}{% endfor %}
 <tr><th colspan="2">合計 CVE</th><th class="cnt">{{ summary.total }}</th><td colspan="{{ summary.statuses|length }}" class="muted">其中 kernel {{ summary.total_kernel }}</td></tr></table>
+</details>
 
 <h3>Kernel 修補版本（截至 {{ f.to }}） <span class="muted">（給風險評鑑單用；只算期末前已發布的修正，取最高的修正版本）</span></h3>
 {% if summary.kernel %}<table><tr><th>Ubuntu</th><th>kernel 系列</th><th class="num">弱點數</th><th class="num">期末前已修正</th><th>升級到</th><th>最高者（CVE／USN／發布日）</th>
 <th class="num">期末仍未修正</th><th class="num">日期不明</th><th>評鑑單文字</th></tr>
 {% for k in summary.kernel %}<tr><td class="nowrap">{{ k.release }}</td><td class="nowrap">{{ k.series }}</td><td class="num">{{ k.total }}</td><td class="num">{{ k.fixed_n }}</td>
-<td class="nowrap"><b>{{ k.upgrade_to or '—' }}</b></td>
+<td class="nowrap"><b>{{ k.upgrade_to or '—' }}</b>{% if k.top_pro %} <span class="muted">（需要 Ubuntu Pro）</span>{% endif %}</td>
 <td class="nowrap">{% if k.top_cve %}<a href="{{ url_for('cve', cve=k.top_cve) }}">{{ k.top_cve }}</a><br><span class="muted">{{ k.top_usn }}，{{ k.top_date }}{% if k.top_same > 1 %}；同版本共 {{ k.top_same }} 個{% endif %}</span>{% endif %}</td>
 <td class="num">{{ k.open_n }}{% if k.later_n %}<br><span class="muted">期末後修正 {{ k.later_n }}</span>{% endif %}</td><td class="num">{{ k.nodate_n }}</td>
 <td style="font-size:.85rem">{{ k.sentence }}</td></tr>{% endfor %}

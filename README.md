@@ -226,7 +226,7 @@ kernel API 查詢失敗（不是 404）時，沿用上一次取得的 kernel 資
 |---|---|
 | 總覽 | 各等級數量、OSV 資料日期（太舊會警告）、每台主機的 CVE 數與是否需要重開機、最近同步紀錄 |
 | 受影響主機 | 給維運：以 CVE 為單位，看主機有幾台受影響。「待更新」＝已有修正版本、主機還沒更新；「尚無修正」＝主機有裝、官方還沒修正（待評估／受影響／修正中／延後修正／不修正）。每格只列 3 台主機（數百台時不會爆版），其餘點 CVE 頁；CSV 列全部；每頁 100 列 |
-| 輸出報表 | 給主管：依 **CVE 公開日期**（可一鍵選季），列出 Ubuntu 官方對每個 CVE × 套件 × 版本（20.04／22.04／24.04）的處理狀態（繁體中文；滑鼠移到狀態上顯示官方英文名稱），**跟主機無關**。「已修正」以**報表期末日**判斷（修正的 USN 在期末前發布才算），期末後才修正的列「期末後修正」、沒有 USN 的列「已修正（日期不明）」。統計表＝等級 × 版本 × 狀態（以 CVE 計，多個套件取最需要注意的狀態）；「Kernel 修補版本」＝每個 kernel 系列截至期末要升級到哪一版（取最高的修正版本，附 CVE／USN／日期與評鑑單文字）；明細可依狀態篩選、各欄排序、每頁 100 列；下載 Excel（統計、Kernel 修補版本、Kernel 明細、狀態說明、明細） |
+| 輸出報表 | 給主管：依 **CVE 公開日期**（可一鍵選季），**跟主機無關**，「已修正」以**報表期末日**判斷（修正的 USN 在期末前發布才算）。最上方是**主管摘要**：一句話結論、數字卡（critical＋high）、版本 × 等級矩陣（尚未解決／適用，和上一期比較）、要做的事（kernel 升級版本、一般套件更新、官方未修正追蹤）。下方依序是統計（版本 → 等級 → kernel／其他套件）、Kernel 修補版本（附評鑑單文字）、可展開的狀態明細、CVE 明細（篩選、排序、每頁 100 列）。Excel 依序：主管摘要、統計、狀態明細、Kernel 修補版本、Kernel 明細、狀態說明、明細 |
 | 明細 | 比對結果「主機 × 套件 × CVE」一行，只含已有修正版本的項目（官方還沒修正的看受影響主機）；可篩選主機、CVE、套件、等級、狀態、未解決／已解決（主機×CVE 彙總：`/findings?view=summary`） |
 | 主機頁、CVE 頁 | 單一主機的所有 CVE；單一 CVE：每台主機的狀態（待更新／尚無修正／已修正／不受影響）與官方狀態表 |
 | 例外 | 風險接受：主機（可用 `*`）＋ CVE（可用 `*`）＋原因＋到期日；不刪資料，只在畫面與報表上標示 |
@@ -319,7 +319,7 @@ WEB_TLS_KEY=/config/tls.key
 docker compose build
 docker compose run --rm --no-deps cvehub python -m unittest discover -s tests -t . </dev/null
 ```
-✅ 最後一行是 `OK`（目前 59 個測試，約 9 秒；不需要網路、Landscape 或真的 OSV／VEX 檔）。
+✅ 最後一行是 `OK`（目前 64 個測試，約 9 秒；不需要網路、Landscape 或真的 OSV／VEX 檔）。
 過程中會印出一段 `ValueError: 檔案中沒有任何 24.04 的資料`，那是「錯誤檔案應該被拒絕」的測試，正常。
 
 涵蓋：Debian 版本比較、OSV 匯入（撤回的 CVE、其他版本、惡意路徑、缺版本時保留舊資料、放檔目錄）、比對（已修／未修／部分修、Pro 才有的修正、舊 kernel、執行中 kernel 的 reboot／upgrade+reboot、kernel 名稱不在 OSV 時的推回）、歷史（新增→解決→再出現）、例外、kernel API（JSON／純文字／404／URL 編碼／主機對應）、網頁（登入、CSRF、XSS、/healthz、CSV）。
@@ -338,7 +338,7 @@ docker compose run --rm --no-deps cvehub python -m unittest discover -s tests -t
 cd /opt/cvehub
 sudo bash scripts/upgrade.sh /tmp/cvehub-0.6.0.zip
 ```
-腳本會先確認 `.env` 的 `BASE_IMAGE` 在本機；沒有的話試著 `docker pull`，主機不能連外而拉不到時就停下並提示（什麼都不會改）。
+換好程式後，腳本會用和建置相同的 compose 設定確認基礎 image（`BASE_IMAGE`）在本機；沒有的話試著 `docker pull`，主機不能連外而拉不到時就自動還原程式並提示（容器不會動到）。換程式到測試完成之間（步驟 2–3）失敗、按 Ctrl-C 或 SSH 斷線，都會自動還原程式；開始停機後（步驟 4–6）SSH 斷線不會中止腳本，會繼續把新版啟動完成；這段按 Ctrl-C 或失敗則會印出回復指令。
 腳本會顯示「目前版本 → 新版本」與更新說明，確認後依序：
 1. 備份程式與設定到 `backups/<時間>-<舊版本>/code.tgz`
 2. 替換程式檔（**`.env`、`data/`、`config/`、`docker-compose.override.yml` 不會動**）
@@ -348,6 +348,7 @@ sudo bash scripts/upgrade.sh /tmp/cvehub-0.6.0.zip
 6. 等容器 healthy，印出 `/healthz`
 
 ✅ 最後印出「已更新到 x.y.z」與回復指令。到網頁右上角確認版本號。
+每次更新／回復的過程也會記在 `backups/upgrade.log`（SSH 斷線後可以用它確認結果）；同時只能有一個更新或回復在執行。
 
 **第一次從 0.5.x 更新**（舊版還沒有 `scripts/`）：用新版裡的腳本，並指定安裝目錄：
 ```bash

@@ -60,6 +60,16 @@ class OsvImportTest(unittest.TestCase):
             self.assertEqual(os.listdir(Config.OSV_INBOX_DIR), [])
             self.assertEqual(len(os.listdir(Config.OSV_ARCHIVE_DIR)), 1)
 
+    def test_usn_first_fix_ignores_empty_date(self):
+        from tests.helpers import usn_record
+        with TempEnv() as t:
+            u1 = usn_record("USN-A", "2026-09-01", ["CVE-2026-0001"], [(E, "openssl", "3.0.13-0ubuntu3.4")])
+            u2 = usn_record("USN-0", "", ["CVE-2026-0001"], [(E, "openssl", "3.0.13-0ubuntu3.4")])    # 沒有日期
+            u2["published"] = ""
+            osv_import.import_file(t.con, make_osv_tar(os.path.join(t.dir.name, "o.tar.xz"), RECORDS, usns=[u2, u1]))
+            r = t.con.execute("SELECT usn, published FROM usn_fix WHERE cve='CVE-2026-0001'").fetchone()
+            self.assertEqual(tuple(r), ("USN-A", "2026-09-01"))
+
     def test_reimport_when_format_outdated(self):
         with TempEnv() as t:
             rec = osv_record("CVE-2026-0001", [(E, "openssl", "1.0", {})], details="some description")

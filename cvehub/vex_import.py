@@ -18,6 +18,7 @@ import tarfile
 import urllib.parse
 
 from .config import Config
+from .kernel import kernel_variant
 
 log = logging.getLogger(__name__)
 
@@ -79,11 +80,8 @@ def _note(s):
 
 
 def _kernel_variant(src):
-    """linux 與 linux-hwe-* 以外的 kernel（aws、azure、gcp、oem、lowlatency…）：佔 VEX 約 87% 的資料量，
-    預設不匯入；主機有用到的話把名稱（可用 *）加進 VEX_KEEP_KERNEL_VARIANTS"""
-    if not src.startswith("linux-") or src.startswith("linux-hwe-") or src == "linux-firmware":
-        return False
-    return not any(fnmatch.fnmatch(src, p) for p in Config.VEX_KEEP_KERNEL_VARIANTS)
+    """雲端／OEM kernel 變體：佔 VEX 約 87% 的資料量，預設不匯入；主機有用到的話把名稱（可用 *）加進 VEX_KEEP_KERNEL_VARIANTS"""
+    return kernel_variant(src) and not any(fnmatch.fnmatch(src, p) for p in Config.VEX_KEEP_KERNEL_VARIANTS)
 
 
 def _distros(releases):

@@ -53,6 +53,7 @@ def _age_days(imp):
 
 
 PER_PAGE = 100
+LOGIN_MAX_BODY = 16 * 1024
 
 
 def _page(rows):
@@ -113,15 +114,21 @@ def create_app(start_scheduler=True):
                 return Response("需要登入", 401, {"WWW-Authenticate": 'Basic realm="cvehub-api"'})
             g.user, g.role = u["username"], u["role"]
             return None
-        if request.method == "POST":
-            # 防 CSRF：POST 必須來自同一個網站，並帶 session 裡的 token
+        def check_csrf():
+            # 防 CSRF：POST 必須來自同一個網站，並帶 session 裡的 token（這裡才會讀表單內容）
             src = request.headers.get("Origin") or request.headers.get("Referer") or ""
             if urllib.parse.urlparse(src).netloc != request.host:
                 abort(403)
             if not hmac.compare_digest(str(request.form.get("csrf", "")), str(session.get("csrf", "-"))):
                 abort(Response("表單已過期，請重新整理頁面再試一次", 400))
+
         if ep == "login":
+            if request.method == "POST":
+                # 登入表單很小：這個請求最多讀 LOGIN_MAX_BODY（有 Content-Length 超過就 413；chunked 讀到上限就停）
+                request.max_content_length = LOGIN_MAX_BODY
+                check_csrf()
             return None
+        # 先確認已登入、有權限，才讀 POST 的內容（未登入的上傳不會被解析或寫到磁碟）
         u = auth.get_user(g.con, session.get("uid", 0)) if session.get("uid") else None
         idle = time.time() - session.get("seen", 0) > Config.WEB_SESSION_IDLE_MINUTES * 60
         if not u or not u["active"] or u["session_ver"] != session.get("ver") or idle:
@@ -129,10 +136,12 @@ def create_app(start_scheduler=True):
             if request.method == "GET":
                 return redirect(url_for("login", next=request.full_path if request.query_string else request.path))
             abort(401)
-        session["seen"] = int(time.time())
         g.user, g.role = u["username"], u["role"]
         if g.role != "admin" and (request.method == "POST" and ep not in ("logout", "account") or ep == "users"):
             abort(Response("需要管理權限", 403))
+        if request.method == "POST":
+            check_csrf()
+        session["seen"] = int(time.time())
 
     def _ip():
         return request.remote_addr or ""
@@ -166,13 +175,14 @@ def create_app(start_scheduler=True):
         err = ""
         if request.method == "POST":
             name = request.form.get("username", "")
-            u, err = auth.verify_login(g.con, name, request.form.get("password", ""))
+            why = []
+            u, err = auth.verify_login(g.con, name, request.form.get("password", ""), why)
             if u:
                 session.clear()                  # 換一個新的 session（防 session fixation）
                 session.update(uid=u["id"], ver=u["session_ver"], seen=int(time.time()), csrf=secrets.token_urlsafe(32))
                 auth.audit(g.con, u["username"], _ip(), "login")
                 return redirect(_safe_next(request.form.get("next")))
-            auth.audit(g.con, name[:64], _ip(), "login-failed", err)
+            auth.audit(g.con, name[:64], _ip(), "login-failed", "；".join(why) or err)
         return render_template("login.html", err=err, next=request.values.get("next", ""))
 
     @app.route("/logout", methods=["POST"])
@@ -282,7 +292,7 @@ def create_app(start_scheduler=True):
              "min_priority": a.get("min_priority") if a.get("min_priority") in period.LEVELS else "medium",
              "status": a.get("status") if a.get("status") in dict(period.STATUS_FILTERS) else ""}
         try:
-            period.valid_date(f["from"]); period.valid_date(f["to"])
+            f["from"], f["to"] = period.valid_date(f["from"]), period.valid_date(f["to"])
         except ValueError:
             abort(400)
         if f["from"] > f["to"]:
@@ -308,7 +318,7 @@ def create_app(start_scheduler=True):
                                per_page=PER_PAGE, have_vex=bool(vex),
                                export_url=export_url, levels=period.LEVELS, releases=period.RELEASES,
                                status_filters=period.STATUS_FILTERS, statuses=vex_import.STATUSES,
-                               label=vex_import.LABEL, label_en=vex_import.LABEL_EN)
+                               label=vex_import.LABEL, label_en=vex_import.LABEL_EN, kinds=period.KINDS)
 
     @app.route("/impact")
     def impact_page():
@@ -320,7 +330,7 @@ def create_app(start_scheduler=True):
         for k in ("from", "to"):
             if f[k]:
                 try:
-                    period.valid_date(f[k])
+                    f[k] = period.valid_date(f[k])
                 except ValueError:
                     abort(400)
         rows = impact.affected(g.con, f["min_priority"], f["from"] or None, f["to"] or None, f["host"] or None,

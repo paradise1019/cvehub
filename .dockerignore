@@ -3,3 +3,5 @@ config
 .env
 mock-kernel-api
 **/__pycache__
+backups
+scripts

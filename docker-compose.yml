@@ -10,7 +10,8 @@ services:
         HTTP_PROXY: ${BUILD_HTTP_PROXY:-}
         HTTPS_PROXY: ${BUILD_HTTPS_PROXY:-}
         NO_PROXY: ${BUILD_NO_PROXY:-}
-    image: cvehub:0.7.0
+        CODE_FP: ${CODE_FP:-}              # 由 scripts/upgrade.sh 帶入，不要寫在 .env
+    image: cvehub:0.8.0
     env_file: .env
     ports:
       - "8080:8080"
