@@ -4,6 +4,7 @@ import os
 import re
 import time
 import unittest
+import unittest.mock
 
 from werkzeug.security import generate_password_hash
 
@@ -44,6 +45,39 @@ class WebTest(unittest.TestCase):
         from cvehub import web
         web.run_job = self._run_job
         self.env.__exit__()
+
+    def test_hosts_upload_only_in_file_mode(self):
+        def csv_():
+            return (io.BytesIO(b"hostname,release,package,version\nweb01,24.04,openssl,3.0.13-0ubuntu3\n"), "h.csv")
+        self.assertNotIn("上傳主機清單", self.c.get("/data").get_data(as_text=True))
+        self.assertEqual(self.post("/data", data={"kind": "hosts", "file": csv_()}).status_code, 400)    # landscape 模式不收
+        Config.HOST_SOURCE = "file"
+        try:
+            self.assertIn("上傳主機清單", self.c.get("/data").get_data(as_text=True))
+            self.assertEqual(self.post("/data", data={"kind": "hosts", "file": csv_()}).status_code, 302)
+            self.assertEqual(len(os.listdir(Config.HOSTS_INBOX_DIR)), 1)
+            bad = (io.BytesIO(b"x"), "h.txt")
+            self.assertEqual(self.post("/data", data={"kind": "hosts", "file": bad}).status_code, 400)
+        finally:
+            Config.HOST_SOURCE = "landscape"
+
+    def test_upload_while_database_busy(self):
+        """OSV 匯入（單一交易）佔住寫入鎖時，上傳仍成功；稽核紀錄改記在 log"""
+        import sqlite3
+        from cvehub import db
+        Config.HOST_SOURCE = "file"
+        busy = db.connect()
+        busy.execute("PRAGMA busy_timeout=0")
+        try:
+            busy.execute("BEGIN IMMEDIATE")
+            with self.assertLogs("cvehub.auth", "WARNING"):
+                with unittest.mock.patch("sqlite3.connect", wraps=lambda *a, **k: sqlite3.Connection(*a, **dict(k, timeout=0.1))):
+                    r = self.post("/data", data={"kind": "hosts", "file": (io.BytesIO(b"hostname,release,package,version\n"), "h.csv")})
+            self.assertEqual(r.status_code, 302)
+        finally:
+            busy.rollback()
+            busy.close()
+            Config.HOST_SOURCE = "landscape"
 
     def test_requires_login(self):
         anon = self.app.test_client()

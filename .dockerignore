@@ -5,3 +5,7 @@ mock-kernel-api
 **/__pycache__
 backups
 scripts
+ansible
+install.sh
+.env.new
+.install-incomplete

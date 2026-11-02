@@ -24,7 +24,7 @@ def _osv_check():
         # 升級後的舊格式資料：啟動後自動用保存檔重新匯入一次（保存檔不見了就不重試，畫面上會一直提醒）
         reimport = not _reimport_tried and osv_import.outdated(con)
         if (glob.glob(os.path.join(Config.OSV_INBOX_DIR, "*.tar.xz")) or glob.glob(os.path.join(Config.VEX_INBOX_DIR, "*.tar.xz"))
-                or reimport):
+                or (Config.HOST_SOURCE == "file" and glob.glob(os.path.join(Config.HOSTS_INBOX_DIR, "*.csv"))) or reimport):
             if run_job("sync") and reimport:   # sync 會先匯入新檔、重匯舊格式
                 _reimport_tried = True
     finally:

@@ -1,0 +1,97 @@
+# 收集 cvehub 主機清單（.env 設 HOST_SOURCE=file 時使用）
+# 每台主機產生：Ubuntu 版本、Pro 狀態、執行中 kernel、所有已安裝套件 → 合併成一個 CSV
+# 只讀取（dpkg-query、uname、pro status），不需要 sudo、不改任何東西
+#
+# 用法：
+#   ansible-playbook -i <inventory> collect-hosts.yml
+#   ansible-playbook -i <inventory> collect-hosts.yml -e cvehub_hosts=ubuntu_servers -e cvehub_out=/tmp/hosts.csv
+#   （--limit 也可以用）
+# 產生的檔案從 cvehub 網頁「資料匯入」上傳，或放到 cvehub 的 data/hosts-inbox/
+#
+# 變數：
+#   cvehub_hosts     要收集的主機（inventory 群組或樣式），預設 all
+#   cvehub_out       輸出檔，預設執行者家目錄下 cvehub-hosts-<日期時間>.csv
+#   cvehub_hostname  CSV 裡的主機名稱，預設 inventory 名稱
+
+- name: 收集主機清單給 cvehub
+  hosts: "{{ cvehub_hosts | default('all') }}"
+  gather_facts: false
+  become: false
+  strategy: linear          # 合併前要等所有主機做完（ansible.cfg 設 free 時也一樣）
+  tasks:
+    - name: 在控制端建立暫存目錄（每次新的，沒連上的主機不會沿用舊檔）
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: cvehub-parts.
+      register: cvehub_tmp
+      run_once: true
+      delegate_to: localhost
+
+    - name: 產生這台主機的 CSV（連不上或失敗的主機會略過，最後列出）
+      ansible.builtin.shell: |
+        set -eu
+        export LC_ALL=C
+        . /etc/os-release
+        release="${VERSION_ID:-}"
+        pro=""
+        if command -v pro >/dev/null 2>&1; then
+          pro=$(pro status --format json 2>/dev/null | python3 -c 'import json,sys; print("yes" if json.load(sys.stdin).get("attached") else "no")' 2>/dev/null || true)
+        fi
+        krel=$(uname -r)
+        kver=$(awk '{print $2}' /proc/version_signature 2>/dev/null || true)
+        now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        echo "hostname,release,pro,kernel_release,kernel_version,collected_at,package,version"
+        # 狀態第二個字元是 i＝已安裝（含 hold 的套件）；rc（只剩設定檔）不列
+        dpkg-query -W -f='${db:Status-Abbrev}\t${binary:Package}\t${Version}\n' \
+          | awk -F'\t' -v p="$HOST,$release,$pro,$krel,$kver,$now" 'substr($1,2,1)=="i" {print p "," $2 "," $3}'
+      args:
+        executable: /bin/bash
+      environment:
+        HOST: "{{ cvehub_hostname | default(inventory_hostname) }}"
+      register: cvehub_csv
+      changed_when: false
+      check_mode: false
+      ignore_errors: true
+      ignore_unreachable: true
+
+    - name: 存到控制端
+      ansible.builtin.copy:
+        content: "{{ cvehub_csv.stdout }}\n"
+        dest: "{{ cvehub_tmp.path }}/{{ inventory_hostname }}.csv"
+        mode: "0600"
+      delegate_to: localhost
+      when: (cvehub_csv.rc | default(1)) == 0
+      ignore_errors: true     # 寫不進控制端也不中斷，最後一定會合併、列出結果、刪除暫存
+
+    - name: 合併成一個 CSV、列出結果、刪除暫存
+      run_once: true
+      delegate_to: localhost
+      block:
+        - name: 決定輸出檔名
+          ansible.builtin.set_fact:
+            cvehub_outfile: "{{ cvehub_out | default(lookup('env', 'HOME') ~ '/cvehub-hosts-' ~ lookup('pipe', 'date +%Y%m%d-%H%M%S') ~ '.csv') }}"
+
+        - name: 合併（每台主機的標題列會留著，cvehub 匯入時會略過重複的標題列）
+          ansible.builtin.assemble:
+            src: "{{ cvehub_tmp.path }}"
+            dest: "{{ cvehub_outfile }}"
+            mode: "0600"
+
+        - name: 列出收到的主機
+          ansible.builtin.find:
+            paths: "{{ cvehub_tmp.path }}"
+            patterns: "*.csv"
+          register: cvehub_parts
+
+        - name: 結果
+          vars:
+            got: "{{ cvehub_parts.files | map(attribute='path') | map('basename') | map('regex_replace', '\\.csv$', '') | list }}"
+          ansible.builtin.debug:
+            msg:
+              - "輸出：{{ cvehub_outfile }}（主機 {{ got | length }}／{{ ansible_play_hosts_all | length }}）"
+              - "沒收到（連不上或失敗）：{{ ansible_play_hosts_all | difference(got) | join(', ') or '無' }}"
+      always:
+        - name: 刪除暫存目錄
+          ansible.builtin.file:
+            path: "{{ cvehub_tmp.path }}"
+            state: absent

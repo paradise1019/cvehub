@@ -9,3 +9,4 @@ data/
 config/
 *.sqlite3
 *.tar.xz
+.install-incomplete

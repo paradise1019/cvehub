@@ -46,6 +46,12 @@ def run_job(kind, path=None):
     return True
 
 
+def _save_complete(f, dest):
+    """先寫成 .part 再改名：同步途中掃描放檔目錄時不會讀到寫一半的檔案"""
+    f.save(dest + ".part")
+    os.replace(dest + ".part", dest)
+
+
 def _age_days(imp):
     if not imp or not imp["file_mtime"]:
         return 0
@@ -402,17 +408,24 @@ def create_app(start_scheduler=True):
         if request.method == "POST":
             kind = request.form.get("kind")
             f = request.files.get("file")
+            if kind == "hosts" and Config.HOST_SOURCE == "file" and f and f.filename.lower().endswith(".csv"):
+                os.makedirs(Config.HOSTS_INBOX_DIR, exist_ok=True)
+                _save_complete(f, os.path.join(Config.HOSTS_INBOX_DIR, "hosts-upload-%s.csv" % datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")))
+                auth.audit(g.con, g.user, _ip(), "upload-hosts", f.filename[:200])
+                run_job("sync")
+                return redirect(url_for("data"))
             if kind not in ("osv", "vex") or not f or not f.filename.endswith(".tar.xz"):
                 abort(400)
             inbox = Config.OSV_INBOX_DIR if kind == "osv" else Config.VEX_INBOX_DIR
             os.makedirs(inbox, exist_ok=True)
-            f.save(os.path.join(inbox, "%s-all-upload-%s.tar.xz" % (kind, datetime.datetime.now().strftime("%Y%m%d%H%M%S"))))
+            _save_complete(f, os.path.join(inbox, "%s-all-upload-%s.tar.xz" % (kind, datetime.datetime.now().strftime("%Y%m%d%H%M%S"))))
             auth.audit(g.con, g.user, _ip(), "upload-" + kind, f.filename[:200])
             run_job("sync")      # sync 會先檢查放檔目錄並匯入
             return redirect(url_for("data"))
         rows = g.con.execute("SELECT * FROM osv_import ORDER BY id DESC LIMIT 20").fetchall()
         vex_rows = g.con.execute("SELECT * FROM vex_import ORDER BY id DESC LIMIT 20").fetchall()
-        return render_template("data.html", rows=rows, vex_rows=vex_rows)
+        host_rows = g.con.execute("SELECT * FROM host_import ORDER BY id DESC LIMIT 20").fetchall()
+        return render_template("data.html", rows=rows, vex_rows=vex_rows, host_rows=host_rows)
 
     @app.route("/sync", methods=["POST"])
     def sync_now():

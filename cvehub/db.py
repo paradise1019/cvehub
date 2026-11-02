@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS vex_status (
 );
 CREATE INDEX IF NOT EXISTS vex_rel_src ON vex_status(release, source);
 
--- 主機（來自 Landscape；kernel 欄位來自 kernel API）
+-- 主機（來自 Landscape 或主機清單 CSV；kernel 欄位來自 kernel API 或 CSV；清單匯入的主機 landscape_id 是 NULL）
 CREATE TABLE IF NOT EXISTS host (
     id INTEGER PRIMARY KEY,
     landscape_id INTEGER UNIQUE,
@@ -166,6 +166,19 @@ CREATE TABLE IF NOT EXISTS audit_log (
     detail TEXT
 );
 
+-- 主機清單匯入紀錄（HOST_SOURCE=file）
+CREATE TABLE IF NOT EXISTS host_import (
+    id INTEGER PRIMARY KEY,
+    filename TEXT,
+    sha256 TEXT,
+    imported_at TEXT NOT NULL,
+    status TEXT,                   -- ok | failed
+    hosts INTEGER,
+    packages INTEGER,
+    deactivated INTEGER,
+    message TEXT
+);
+
 -- 每次同步的紀錄
 CREATE TABLE IF NOT EXISTS sync_run (
     id INTEGER PRIMARY KEY,
@@ -182,8 +195,11 @@ CREATE TABLE IF NOT EXISTS sync_run (
 """
 
 
+BUSY_TIMEOUT = 60     # 秒：資料庫被其他連線鎖住時最多等多久
+
+
 def connect(path=None):
-    con = sqlite3.connect(path or Config.DB_PATH, timeout=60)
+    con = sqlite3.connect(path or Config.DB_PATH, timeout=BUSY_TIMEOUT)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys=ON")
     return con

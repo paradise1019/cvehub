@@ -2,7 +2,7 @@
 {% block title %}{{ h.hostname }}{% endblock %}
 {% block body %}
 <div class="card"><h2 style="margin:.2rem 0">{{ h.hostname }}</h2>
-IP {{ h.ip or '-' }}・Ubuntu {{ h.release }}・Pro：{{ {1:'是',0:'否'}.get(h.pro_attached, '?') }}・套件 {{ h.package_count }}・Landscape ID {{ h.landscape_id }}・最後同步 {{ h.last_seen }}<br>
+IP {{ h.ip or '-' }}・Ubuntu {{ h.release }}・Pro：{{ {1:'是',0:'否'}.get(h.pro_attached, '?') }}・套件 {{ h.package_count }}・{% if h.landscape_id %}Landscape ID {{ h.landscape_id }}{% else %}來源：主機清單匯入{% endif %}・最後同步 {{ h.last_seen }}<br>
 執行中 kernel：{% if h.kernel_status in ('ok', 'error') and h.kernel_version %}{{ h.kernel_release }}（{{ h.kernel_version }}，收集於 {{ h.kernel_collected_at }}）{% if h.kernel_status == 'error' %}<span class="muted">：kernel API 查詢失敗，沿用上次資料</span>{% endif %}{% else %}{{ h.kernel_status }}{% endif %}</div>
 <p>{% for k,v in [("open","未解決"),("resolved","已解決"),("all","全部")] %}<a href="{{ url_for('host', hid=h.id, state=k) }}">{% if state==k %}<b>{{v}}</b>{% else %}{{v}}{% endif %}</a> {% endfor %}
 ・<a href="{{ url_for('findings', host=h.hostname, format='csv', state=state) }}">匯出 CSV</a></p>

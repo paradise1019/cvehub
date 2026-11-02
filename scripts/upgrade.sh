@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # cvehub 更新／回復
 #
+#   一般用 install.sh（已安裝時會自動呼叫這支）；也可以直接：
 #   更新：sudo bash scripts/upgrade.sh <新版的 zip>          （例：cvehub-0.6.0.zip，GitHub 的 Download ZIP 也可以）
 #   回復：sudo bash scripts/upgrade.sh --rollback backups/<時間-舊版本>
 #   不詢問：加 -y
@@ -12,8 +13,8 @@
 #       → 停容器 → 備份資料庫 → 啟動新版 → 健康檢查
 set -Eeuo pipefail
 
-CODE_ITEMS=(cvehub tests scripts django-kernel-view mock-kernel-api Dockerfile docker-compose.yml requirements.txt
-            README.md MAINTENANCE.md CHANGELOG.md .env.example .dockerignore .gitignore)
+CODE_ITEMS=(cvehub tests scripts ansible django-kernel-view mock-kernel-api Dockerfile docker-compose.yml requirements.txt
+            install.sh README.md MAINTENANCE.md CHANGELOG.md .env.example .dockerignore .gitignore)
 
 rollback_hint() {   # 回復指令：用備份目錄裡的腳本副本（就是建立這份備份的腳本，安裝目錄的 scripts/ 可能是別的版本或不完整）
     if [[ -f "$1/upgrade.sh" ]]; then

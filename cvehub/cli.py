@@ -3,7 +3,8 @@
   init                    建立資料庫
   import-osv FILE         匯入 osv-all.tar.xz
   import-vex FILE         匯入 vex-all.tar.xz（官方處理狀態）
-  sync                    同步主機並比對（會先檢查 OSV／VEX 放檔目錄）
+  import-hosts FILE       匯入主機清單 CSV 並重新比對（HOST_SOURCE=file）
+  sync                    同步主機並比對（會先檢查 OSV／VEX／主機清單放檔目錄）
   report                  輸出報表到 REPORT_DIR
   period FROM TO [最低等級]
                           輸出報表（CVE 公開日期 FROM～TO，YYYY-MM-DD），輸出 Excel 到 REPORT_DIR
@@ -14,9 +15,11 @@
   user-list               列出帳號
   hash-password           產生密碼雜湊（舊版 WEB_AUTH_PASSWORD_HASH 用；新部署改用 user-add）
 """
+import datetime
 import getpass
 import logging
 import os
+import shutil
 import sys
 
 from werkzeug.security import generate_password_hash
@@ -47,6 +50,46 @@ def main(argv=None):
         return _user_cmd(con, cmd, argv[1:])
     if cmd == "init":
         print("資料庫：", Config.DB_PATH)
+    elif cmd == "import-hosts":
+        if len(argv) < 2 or Config.HOST_SOURCE != "file":
+            print("用法：import-hosts FILE（.env 要設 HOST_SOURCE=file）", file=sys.stderr)
+            return 1
+        src = os.path.abspath(argv[1])
+        if not os.path.isfile(src):
+            print("找不到檔案：%s" % argv[1], file=sys.stderr)
+            return 1
+        before = con.execute("SELECT COALESCE(MAX(id), 0) FROM host_import").fetchone()[0]     # 放檔之前：只看這之後的紀錄
+        inbox = os.path.abspath(Config.HOSTS_INBOX_DIR)
+        if os.path.dirname(src) == inbox and src.endswith(".csv"):
+            name = os.path.basename(src)            # 已經在放檔目錄
+        else:                                       # 複製進放檔目錄（排在已有的檔案之後，照先後順序處理）
+            name = "cli-%s-%s.csv" % (datetime.datetime.now().strftime("%Y%m%d%H%M%S%f"), os.path.splitext(os.path.basename(src))[0])
+            os.makedirs(inbox, exist_ok=True)
+            shutil.copyfile(src, os.path.join(inbox, name + ".part"))
+            os.replace(os.path.join(inbox, name + ".part"), os.path.join(inbox, name))
+        sync_error = None
+        try:
+            with job_lock():
+                sync.run_sync(con)
+        except Busy as e:
+            print("%s；檔案已在放檔目錄，會由正在執行的同步或下一次同步處理（結果看網頁「資料匯入」）" % e, file=sys.stderr)
+            return 2
+        except Exception as e:
+            sync_error = e          # 主機清單在比對前就已處理，先看匯入結果
+        r = con.execute("SELECT * FROM host_import WHERE filename=? AND id>? ORDER BY id DESC LIMIT 1", (name, before)).fetchone()
+        if r is None:
+            if os.path.exists(os.path.join(inbox, name)):      # 同步在處理主機清單之前就失敗了
+                print("還沒有匯入（%s）；檔案在放檔目錄，下次同步會處理" % (sync_error or "原因不明"), file=sys.stderr)
+            else:
+                print("匯入失敗，而且無法寫入紀錄；檔案已移到 %s（檔名 failed-…），請看容器 log" % Config.HOSTS_ARCHIVE_DIR, file=sys.stderr)
+            return 1
+        if r["status"] != "ok":
+            print("匯入失敗：%s" % (r["message"] or "狀態 %s，請看容器 log" % r["status"]), file=sys.stderr)
+            return 1
+        print("匯入完成：主機 %d、套件 %d、停用 %d" % (r["hosts"], r["packages"], r["deactivated"]))
+        if sync_error:
+            print("比對失敗：%s" % sync_error, file=sys.stderr)
+            return 1
     elif cmd in ("import-osv", "import-vex", "sync"):
         try:
             with job_lock():

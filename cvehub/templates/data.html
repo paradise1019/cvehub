@@ -11,7 +11,17 @@
 <form class="card" method="post" enctype="multipart/form-data" style="text-align:left"><input type="hidden" name="kind" value="vex"><input type="hidden" name="csrf" value="{{ csrf_token() }}">
  <b>上傳 vex-all.tar.xz</b><br><span class="muted">https://security-metadata.canonical.com/vex/vex-all.tar.xz（約 80 MB，匯入約 3–5 分鐘）</span><br>
  <input type="file" name="file" accept=".xz" required> <button>上傳並匯入</button></form>
-</div>{% else %}<div class="card muted">上傳資料需要「管理」角色。</div>{% endif %}
+</div>
+{% if cfg.HOST_SOURCE == 'file' %}<form class="card" method="post" enctype="multipart/form-data" style="text-align:left"><input type="hidden" name="kind" value="hosts"><input type="hidden" name="csrf" value="{{ csrf_token() }}">
+ <b>上傳主機清單 CSV</b>（目前主機來源：清單匯入，{{ '清單代表全部主機，沒列出的停用' if cfg.HOSTS_FILE_MODE == 'replace' else '沒列出的主機保留上次資料' }}）<br>
+ <span class="muted">欄位：hostname, release, package, version（必要）；ip, pro, kernel_release, kernel_version, collected_at（選填）。也可放到 {{ cfg.HOSTS_INBOX_DIR }}。</span><br>
+ <input type="file" name="file" accept=".csv" required> <button>上傳並匯入</button></form>{% endif %}
+{% else %}<div class="card muted">上傳資料需要「管理」角色。</div>{% endif %}
+{% if cfg.HOST_SOURCE == 'file' or host_rows %}<h3>主機清單匯入紀錄</h3>
+<table><tr><th>檔案</th><th>匯入時間</th><th>結果</th><th>主機</th><th>套件</th><th>停用</th><th>sha256</th><th>訊息</th></tr>
+{% for r in host_rows %}<tr><td>{{ r.filename }}</td><td>{{ r.imported_at }}</td><td>{{ r.status }}</td><td class="num">{{ r.hosts or '' }}</td>
+<td class="num">{{ r.packages or '' }}</td><td class="num">{{ r.deactivated or '' }}</td><td class="muted">{{ (r.sha256 or '')[:16] }}…</td><td>{{ r.message or '' }}</td></tr>{% endfor %}
+</table>{% endif %}
 <h3>OSV 匯入紀錄</h3>
 <table><tr><th>檔案</th><th>檔案日期</th><th>匯入時間</th><th>版本（筆數）</th><th>CVE</th><th>affected</th><th>結果</th><th>使用中</th><th>sha256</th><th>訊息</th></tr>
 {% for r in rows %}<tr><td>{{ r.filename }}</td><td>{{ r.file_mtime }}</td><td>{{ r.imported_at }}</td><td>{{ r.release_counts or r.releases }}</td><td class="num">{{ r.cve_count or '' }}</td>

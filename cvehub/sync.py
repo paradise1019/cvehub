@@ -5,33 +5,19 @@ import json
 import logging
 import re
 
-from . import osv_import, vex_import
+from . import host_import, osv_import, vex_import
 from .config import Config
+from .kernel import KERNEL_ABI, infer_running
+from .util import norm_release, parse_time as _parse_time
 from .sources import Landscape, kernel_api, kernel_for_host, match_value, primary_ip
 from .vercmp import vercmp
 
 log = logging.getLogger(__name__)
 
-KERNEL_ABI = re.compile(r"^linux-(?:hwe-[0-9.]+-)?(?:image|image-unsigned|modules|modules-extra|headers|tools|cloud-tools|buildinfo)"
-                        r"-(\d+\.\d+\.\d+)-(\d+)(?:-[a-z0-9-]+)?$")
-SIG_VERSION = re.compile(r"(\d+\.\d+\.\d+-\d+\.\d+(?:~[0-9.]+)?)")
-
 
 def now():
     return datetime.datetime.now().isoformat(timespec="seconds")
 
-
-def norm_release(r):
-    m = re.match(r"(\d+\.\d+)", str(r or ""))
-    return m.group(1) if m else ""
-
-
-def _parse_time(s):
-    try:
-        t = datetime.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
-        return t.astimezone().replace(tzinfo=None) if t.tzinfo else t
-    except ValueError:
-        return None
 
 # ---------------------------------------------------------------- 主機同步
 
@@ -80,14 +66,7 @@ def sync_hosts(con):
             if t and (datetime.datetime.now() - t).total_seconds() > Config.KERNEL_API_MAX_AGE_HOURS * 3600:
                 kst = "stale"
             else:
-                krel = k["release"]
-                m = SIG_VERSION.search(k["version"] or "")
-                kver = m.group(1) if m else None
-                if kver and not krel:   # 只有版本（例如純文字回應）：從已安裝套件找出對應的 kernel 名稱
-                    krel = next((n[len("linux-image-"):] for n, v in pk.items()
-                                 if n.startswith("linux-image-") and v == kver and KERNEL_ABI.match(n)), "")
-                if not kver and krel:   # 只有 uname -r：從已安裝套件查版本
-                    kver = pk.get("linux-image-" + krel) or pk.get("linux-image-unsigned-" + krel)
+                krel, kver = infer_running(k["release"], k["version"], pk)
                 kst = "ok" if (kver and krel) else "missing"
         with con:
             cur = con.execute("SELECT id FROM host WHERE landscape_id=?", (c["id"],)).fetchone()
@@ -274,10 +253,13 @@ def run_sync(con):
             vex_import.check_inbox(con)
         except Exception as e:
             log.warning("VEX 匯入失敗，沿用上一份資料：%s", e)
+        if Config.HOST_SOURCE == "file":
+            n = host_import.check_inbox(con)    # 主機清單先處理（還沒有 OSV 也會匯入並記錄，不會一直留在放檔目錄）
         imp = osv_import.active_import(con)
         if not imp:
             raise RuntimeError("還沒有任何 OSV 資料：請把 osv-all.tar.xz 放到 %s" % Config.OSV_INBOX_DIR)
-        n = sync_hosts(con)
+        if Config.HOST_SOURCE != "file":
+            n = sync_hosts(con)
         new = res = 0
         for h in con.execute("SELECT * FROM host WHERE active=1").fetchall():
             a, b = update_findings(con, h, evaluate_host(con, h))

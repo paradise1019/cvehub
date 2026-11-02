@@ -1,0 +1,242 @@
+#!/usr/bin/env bash
+# cvehub 安裝／更新（一支腳本處理兩種情況）
+#
+#   1. 解開 zip：python3 -m zipfile -e cvehub-<版本>.zip /tmp/cvehub-src
+#   2. 執行：    sudo bash /tmp/cvehub-src/*/install.sh
+#
+#   安裝目錄預設 /opt/cvehub（CVEHUB_DIR=/其他/路徑 可改）
+#   - 目錄裡還沒有 cvehub → 全新安裝：問幾個問題、寫 .env、建 image、跑測試、建管理員、啟動
+#   - 上次安裝中途失敗   → 沿用已寫好的 .env，從建 image 接著做（改過 .env 再重跑即可）
+#   - 已經裝過           → 交給 scripts/upgrade.sh 更新（自動備份、測試，失敗還原；.env 與資料不動）
+#   -y：不詢問，全部用預設值（或事先設定的環境變數，見下方 ask 的變數名稱）
+#
+# 主機不需要能 docker pull：基礎 image（預設 python:3.12-slim）要先 docker load 進來，
+# Python 套件從 PIP_INDEX_URL（例如內部 Nexus）安裝。
+set -Eeuo pipefail
+
+SRC="$(cd "$(dirname "$0")" && pwd)"
+APP_DIR="${CVEHUB_DIR:-/opt/cvehub}"
+YES=0
+[[ "${1:-}" == "-y" ]] && YES=1
+
+say()  { printf '%s\n' "$*"; }
+step() { printf '\n▶ %s\n' "$*"; }
+die()  { printf '❌ %s\n' "$*" >&2; exit 1; }
+
+# 問一個問題：ask 變數名 "說明" 預設值 [secret]；環境變數已有值就直接用
+ask() {
+    local var="$1" prompt="$2" def="$3" secret="${4:-}" ans
+    if [[ -n "${!var:-}" ]]; then return; fi
+    if [[ $YES == 1 ]]; then printf -v "$var" '%s' "$def"; return; fi
+    if [[ -n "$secret" ]]; then
+        read -r -s -p "$prompt: " ans; echo
+    else
+        read -r -p "$prompt [$def]: " ans
+    fi
+    printf -v "$var" '%s' "${ans:-$def}"
+}
+
+# 寫入設定檔（$ENV_FILE）的一個設定。含 $、#、空白等字元時加單引號（docker compose 讀 .env 時不會再解讀）
+set_env() {
+    KEY="$1" VAL="$2" python3 - "$ENV_FILE" <<'PY'
+import os, re, sys
+p, k, v = sys.argv[1], os.environ["KEY"], os.environ["VAL"]
+if "'" in v or "\n" in v:
+    sys.exit("%s 的值不能包含單引號或換行" % k)
+if v and not re.fullmatch(r"[A-Za-z0-9_./:,@+=%-]*", v):
+    v = "'" + v + "'"
+lines = open(p, encoding="utf-8").read().splitlines()
+for i, l in enumerate(lines):
+    if l.startswith(k + "="):
+        lines[i] = k + "=" + v
+        break
+else:
+    lines.append(k + "=" + v)
+open(p, "w", encoding="utf-8").write("\n".join(lines) + "\n")
+PY
+}
+
+# 讀 .env 的一個設定（去掉引號）；續裝時用
+get_env() {
+    KEY="$1" python3 - "$APP_DIR/.env" <<'PY'
+import os, sys
+k = os.environ["KEY"]
+for l in open(sys.argv[1], encoding="utf-8"):
+    if l.startswith(k + "="):
+        v = l.split("=", 1)[1].strip()
+        print(v[1:-1] if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"" else v, end="")
+        break
+PY
+}
+
+# 安裝目錄裡屬於使用者的設定、資料與安裝狀態：複製程式、打包更新檔時都不碰（只有這一份清單）
+KEEP_EXCLUDES=(.env .env.new .install-incomplete data config backups docker-compose.override.yml)
+
+# 複製程式到安裝目錄（不含使用者的設定與資料）
+copy_code() {
+    [[ "$SRC" == "$APP_DIR" ]] && return
+    mkdir -p "$APP_DIR"
+    tar -C "$SRC" "${KEEP_EXCLUDES[@]/#/--exclude=./}" -cf - . | tar -C "$APP_DIR" -xf -
+}
+
+[[ $EUID -eq 0 ]] || die "請用 sudo 執行：sudo bash $0"
+[[ -f "$SRC/docker-compose.yml" && -f "$SRC/cvehub/__init__.py" ]] || die "$SRC 不是 cvehub 的程式目錄"
+command -v python3 >/dev/null || die "需要 python3（Ubuntu 內建）"
+command -v docker >/dev/null || die "需要 Docker：sudo apt install docker.io docker-compose-v2"
+docker compose version >/dev/null 2>&1 || die "需要 Docker Compose v2：sudo apt install docker-compose-v2"
+VERSION="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$SRC/cvehub/__init__.py")"
+
+# 安裝狀態：.install-incomplete＝install.sh 寫好 .env 但還沒成功啟動過（成功後刪除）
+# 有 .env 與程式、沒有這個標記＝已安裝（包含 0.8.x 以前手動安裝的）→ 更新
+INCOMPLETE="$APP_DIR/.install-incomplete"
+
+# ---------------------------------------------------------------- 已安裝 → 更新
+if [[ -f "$APP_DIR/.env" && -f "$APP_DIR/cvehub/__init__.py" && ! -e "$INCOMPLETE" ]]; then
+    say "$APP_DIR 已經安裝 cvehub，改用更新流程（→ $VERSION）"
+    tmp="$(mktemp -d)"
+    trap 'rm -rf -- "$tmp"' EXIT
+    # 只打包程式（不含 .env、data、backups、config）
+    SRC_DIR="$SRC" SKIP="${KEEP_EXCLUDES[*]}" python3 - "$tmp/cvehub-$VERSION.zip" <<'PY'
+import os, sys, zipfile
+src = os.environ["SRC_DIR"]
+skip = set(os.environ["SKIP"].split())
+top = "cvehub-src"
+with zipfile.ZipFile(sys.argv[1], "w", zipfile.ZIP_DEFLATED) as z:
+    for root, dirs, files in os.walk(src):
+        rel = os.path.relpath(root, src)
+        if rel == ".":
+            dirs[:] = [d for d in dirs if d not in skip]
+            files = [f for f in files if f not in skip]
+        dirs[:] = [d for d in dirs if d != "__pycache__"]
+        for f in files:
+            full = os.path.join(root, f)
+            z.write(full, os.path.join(top, os.path.relpath(full, src)))
+PY
+    args=("$tmp/cvehub-$VERSION.zip"); [[ $YES == 1 ]] && args+=(-y)
+    rc=0
+    CVEHUB_DIR="$APP_DIR" bash "$SRC/scripts/upgrade.sh" "${args[@]}" || rc=$?
+    exit $rc
+fi
+
+# ---------------------------------------------------------------- 上次安裝沒做完 → 沿用 .env 接著做
+if [[ -f "$APP_DIR/.env" && -e "$INCOMPLETE" ]]; then
+    say "cvehub $VERSION：$APP_DIR 上次安裝沒有完成，沿用現有的 .env 繼續（要重新回答問題：先刪掉 $APP_DIR/.env）"
+    copy_code
+    cd "$APP_DIR"
+    touch "$INCOMPLETE"
+    BASE_IMAGE="$(get_env BASE_IMAGE)"; BASE_IMAGE="${BASE_IMAGE:-python:3.12-slim}"
+    PIP_INDEX_URL="$(get_env PIP_INDEX_URL)"
+    HOST_SOURCE="$(get_env HOST_SOURCE)"
+    mkdir -p config data
+    chown -R 10001 data
+else
+    # ------------------------------------------------------------ 全新安裝
+    say "cvehub $VERSION 全新安裝 → $APP_DIR"
+    if [[ -d "$APP_DIR" ]] && [[ -n "$(ls -A "$APP_DIR" 2>/dev/null)" ]] && [[ "$SRC" != "$APP_DIR" ]] \
+            && [[ ! -f "$APP_DIR/cvehub/__init__.py" ]]; then
+        die "$APP_DIR 已存在且不是空的（也不是 cvehub 安裝目錄）；請換目錄：sudo CVEHUB_DIR=/其他/路徑 bash $0"
+    fi
+
+    step "1/7 設定（直接按 Enter 用括號內的預設值）"
+    ask HOST_SOURCE      "主機來源：file＝匯入主機清單 CSV、landscape＝接 Landscape API" "file"
+    [[ "$HOST_SOURCE" == file || "$HOST_SOURCE" == landscape ]] || die "主機來源只能是 file 或 landscape"
+    ask UBUNTU_RELEASES  "要比對的 Ubuntu 版本（逗號分隔）" "20.04,22.04,24.04"
+    ask TZ_SET           "時區" "Asia/Taipei"
+    ask BASE_IMAGE       "基礎 image（要先 docker load 進來）" "python:3.12-slim"
+    ask PIP_INDEX_URL    "Python 套件來源（內部 Nexus 的 PyPI proxy，或 pypi.org）" "https://pypi.org/simple"
+    ask PIP_TRUSTED_HOST "套件來源是自簽憑證時填它的主機名稱（否則留空）" ""
+    if [[ "$HOST_SOURCE" == landscape ]]; then
+        ask LANDSCAPE_API_URI    "Landscape API 網址" "https://landscape.example.com/api/"
+        ask LANDSCAPE_API_KEY    "Landscape API key" ""
+        ask LANDSCAPE_API_SECRET "Landscape API secret（不顯示）" "" secret
+        ask LANDSCAPE_CA         "Landscape 自簽 CA 憑證檔路徑（公開憑證留空）" ""
+    fi
+
+    step "2/7 複製程式、寫 .env"
+    copy_code
+    cd "$APP_DIR"
+    ENV_FILE="$APP_DIR/.env.new"               # 全部寫完才改名成 .env：中途失敗不會留下寫一半的設定
+    install -m 600 .env.example "$ENV_FILE"
+    set_env HOST_SOURCE "$HOST_SOURCE"
+    set_env UBUNTU_RELEASES "$UBUNTU_RELEASES"
+    set_env TZ "$TZ_SET"
+    set_env BASE_IMAGE "$BASE_IMAGE"
+    set_env PIP_INDEX_URL "$PIP_INDEX_URL"
+    set_env PIP_TRUSTED_HOST "$PIP_TRUSTED_HOST"
+    set_env KERNEL_API_URL ""                  # 沒有 kernel API：用 CSV 的 kernel 欄位或最新安裝的 kernel
+    mkdir -p config data
+    if [[ "$HOST_SOURCE" == landscape ]]; then
+        set_env LANDSCAPE_API_URI "$LANDSCAPE_API_URI"
+        set_env LANDSCAPE_API_KEY "$LANDSCAPE_API_KEY"
+        set_env LANDSCAPE_API_SECRET "$LANDSCAPE_API_SECRET"
+        if [[ -n "$LANDSCAPE_CA" ]]; then
+            install -m 644 "$LANDSCAPE_CA" config/landscape_server_ca.crt
+            set_env LANDSCAPE_CA_FILE /config/landscape_server_ca.crt
+        else
+            set_env LANDSCAPE_CA_FILE ""
+        fi
+    fi
+    chown -R 10001 data                        # 容器內以 UID 10001 執行
+    touch "$INCOMPLETE"
+    mv -f "$ENV_FILE" .env
+    say "   .env 已建立（權限 600）；其他設定的說明在 .env 裡，之後要改：sudo nano $APP_DIR/.env 再 sudo docker compose up -d"
+fi
+
+step "3/7 檢查基礎 image：$BASE_IMAGE"
+if ! docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
+    say "   本機沒有，試著 docker pull…"
+    docker pull "$BASE_IMAGE" >/dev/null 2>&1 || die "拿不到 $BASE_IMAGE。在能上網的機器執行
+     docker pull $BASE_IMAGE && docker save $BASE_IMAGE | gzip > base-image.tar.gz
+   帶進來後：sudo docker load -i base-image.tar.gz，再重新執行：sudo bash $APP_DIR/install.sh"
+fi
+
+step "4/7 建立 image（Python 套件來自 $PIP_INDEX_URL）"
+docker compose build -q || die "建置失敗：檢查 .env 的 PIP_INDEX_URL、PIP_TRUSTED_HOST（套件來源連得到、有 requirements.txt 裡的版本）
+   修正後重新執行：sudo bash $APP_DIR/install.sh"
+
+step "5/7 自動化測試"
+docker compose run --rm --no-deps -T cvehub python -m unittest discover -s tests -t . </dev/null >/tmp/cvehub-test.log 2>&1 \
+    || die "測試失敗，記錄在 /tmp/cvehub-test.log"
+say "   $(grep -E '^Ran ' /tmp/cvehub-test.log)，全部通過"
+
+step "6/7 建立管理員帳號"
+users="$(docker compose run --rm --no-deps -T cvehub python -c "from cvehub import db; c = db.connect(); db.init(c); print(c.execute('SELECT COUNT(*) FROM users').fetchone()[0])" </dev/null 2>/tmp/cvehub-db.log | tail -1 || true)"
+[[ "$users" =~ ^[0-9]+$ ]] || die "無法讀取資料庫（訊息在 /tmp/cvehub-db.log）；修正後重新執行：sudo bash $APP_DIR/install.sh"
+if [[ "$users" -gt 0 ]]; then
+    say "   已有 $users 個帳號，略過"
+elif [[ $YES == 1 ]]; then
+    say "   （-y 模式略過）之後執行：cd $APP_DIR && sudo docker compose run --rm --no-deps cvehub python -m cvehub.cli user-add admin admin"
+else
+    ask ADMIN_USER "管理員帳號名稱" "admin"
+    say "   輸入兩次密碼（至少 12 個字元）"
+    docker compose run --rm --no-deps cvehub python -m cvehub.cli user-add "$ADMIN_USER" admin \
+        || say "   ⚠️ 沒有建立成功；之後可執行：cd $APP_DIR && sudo docker compose run --rm --no-deps cvehub python -m cvehub.cli user-add admin admin"
+fi
+
+step "7/7 啟動"
+docker compose up -d
+for _ in $(seq 1 60); do
+    st="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose ps -q cvehub)" 2>/dev/null || true)"
+    [[ "$st" == healthy ]] && break
+    sleep 3
+done
+[[ "${st:-}" == healthy ]] || die "容器 3 分鐘內沒有變成 healthy，請看：cd $APP_DIR && sudo docker compose logs"
+rm -f -- "$INCOMPLETE"                        # 之後再執行 install.sh 就是更新
+
+port="$(docker compose port cvehub 8080 2>/dev/null | sed 's/.*://')"
+cat <<EOF
+
+✅ cvehub $VERSION 已安裝並啟動
+   網頁：http://$(hostname -I | awk '{print $1}'):${port:-8080}/
+
+接下來（都在網頁「資料匯入」頁，用管理員登入）：
+   1. 上傳 osv-all.tar.xz 與 vex-all.tar.xz（在能上網的電腦下載）
+        https://security-metadata.canonical.com/osv/osv-all.tar.xz
+        https://security-metadata.canonical.com/vex/vex-all.tar.xz
+EOF
+if [[ "$HOST_SOURCE" == file ]]; then
+    say "   2. 上傳主機清單 CSV（用 ansible/collect-hosts.yml 產生，格式見 README「主機清單」）"
+else
+    say "   2. 按「立即同步」從 Landscape 取得主機"
+fi
+say "   正式使用前請改成 HTTPS（README「HTTPS」）"

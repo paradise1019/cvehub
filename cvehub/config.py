@@ -18,6 +18,14 @@ def _s(name, default=""):
 
 
 class Config:
+    # 主機來源：landscape＝從 Landscape API 同步；file＝匯入主機清單 CSV（不呼叫 Landscape，見 host_import.py）
+    HOST_SOURCE = _s("HOST_SOURCE", "landscape")
+    HOSTS_INBOX_DIR = _s("HOSTS_INBOX_DIR", "/data/hosts-inbox")
+    HOSTS_ARCHIVE_DIR = _s("HOSTS_ARCHIVE_DIR", "/data/hosts-archive")
+    HOSTS_KEEP_FILES = _i("HOSTS_KEEP_FILES", 30)
+    # merge＝清單裡沒有的主機保留上次資料；replace＝清單代表全部主機，沒有的停用
+    HOSTS_FILE_MODE = _s("HOSTS_FILE_MODE", "merge")
+
     LANDSCAPE_API_URI = _s("LANDSCAPE_API_URI")
     LANDSCAPE_API_KEY = _s("LANDSCAPE_API_KEY")
     LANDSCAPE_API_SECRET = _s("LANDSCAPE_API_SECRET")

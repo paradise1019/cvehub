@@ -1,7 +1,7 @@
 {% extends "base.html" %}{% from "_prio.html" import prio %}{% from "_pager.html" import pager %}
 {% block title %}受影響主機{% endblock %}
 {% block body %}
-<div class="card intro"><b>受影響主機</b>：以 <b>CVE</b> 為單位，看受管主機（來自 Landscape）有幾台受影響。
+<div class="card intro"><b>受影響主機</b>：以 <b>CVE</b> 為單位，看受管主機（來自 Landscape 或主機清單匯入）有幾台受影響。
 「<b>待更新</b>」＝已有修正版本、主機還沒更新（或需要重開機）；「<b>尚無修正</b>」＝主機有裝這個套件，但官方還沒有修正（待評估／受影響／修正中／延後修正／不修正）。
 每格最多列 {{ sample }} 台主機，<b>點 CVE 編號看全部主機</b>；匯出 CSV 會列出全部主機。<br>
 <span class="muted">和「明細」的差別：明細是比對結果，以「主機 × 套件」為單位，有已安裝版本、修正版本、處理方式與歷史（首次發現、已解決），但只含<b>已有修正版本</b>的項目；

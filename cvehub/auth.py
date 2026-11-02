@@ -7,12 +7,17 @@
 - 第一次啟動時，若沒有任何帳號而 .env 有 WEB_AUTH_USER／WEB_AUTH_PASSWORD_HASH（舊版的單一帳號），自動轉成第一個管理員
 """
 import datetime
+import logging
 import os
 import secrets
+import sqlite3
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
+from . import db
 from .config import Config
+
+log = logging.getLogger(__name__)
 
 ROLES = [("viewer", "檢視"), ("admin", "管理")]
 ROLE_LABEL = dict(ROLES)
@@ -28,9 +33,16 @@ def _now():
 
 
 def audit(con, user, ip, action, detail=""):
-    with con:
-        con.execute("INSERT INTO audit_log(ts,username,ip,action,detail) VALUES (?,?,?,?,?)",
-                    (_now(), user or "", ip or "", action, (detail or "")[:500]))
+    con.execute("PRAGMA busy_timeout=3000")     # 最多等 3 秒，不讓使用者卡在畫面上
+    try:
+        with con:
+            con.execute("INSERT INTO audit_log(ts,username,ip,action,detail) VALUES (?,?,?,?,?)",
+                        (_now(), user or "", ip or "", action, (detail or "")[:500]))
+    except sqlite3.OperationalError as e:
+        # OSV／VEX 匯入（單一交易，約數分鐘）期間資料庫被鎖住：改記到容器 log，不讓上傳等操作失敗
+        log.warning("稽核紀錄改記在 log（%s）：user=%s ip=%s action=%s detail=%s", e, user or "", ip or "", action, (detail or "")[:500])
+    finally:
+        con.execute("PRAGMA busy_timeout=%d" % (db.BUSY_TIMEOUT * 1000))    # 還原 db.connect 的預設
 
 
 def check_password_policy(pw):

@@ -1,6 +1,20 @@
 # 更新說明
 
-更新方式見 README「10. 更新與回復」：`sudo bash scripts/upgrade.sh <新版 zip>`。
+更新方式見 README「6. 更新、回復、備份」：解開新版 zip，`sudo bash <解開的目錄>/install.sh`。
+
+## 0.9.0
+- 新增主機清單匯入（`HOST_SOURCE=file`）：不接 Landscape，改用 CSV 提供主機、Ubuntu 版本、已安裝套件（選填 Pro、執行中 kernel）；網頁上傳、放檔目錄、`cvehub.cli import-hosts` 三種方式（README 3.1）
+- 附 `ansible/collect-hosts.yml`：唯讀收集各主機的套件與 kernel，合併成一個 CSV
+- 新增 `install.sh`：一支腳本處理安裝與更新（全新安裝會問幾個問題、寫 .env、建 image、跑測試、建管理員、啟動；已安裝則交給 `scripts/upgrade.sh`）
+- 文件重寫：README 改成「安裝 → 開始使用 → 主機清單 → 日常維護 → 更新」，其他放附錄；`MAINTENANCE.md` 併入 README
+- `.env.example` 重新排列：安裝時填的放最上面；新安裝預設 `HOST_SOURCE=file`、不接 kernel API
+- OSV／VEX 匯入期間（單一交易，約數分鐘）上傳檔案不再回 500：稽核紀錄寫不進資料庫時改記在容器 log
+- install.sh：安裝中途失敗後重跑會沿用 `.env` 接著做（`.install-incomplete` 標記，成功啟動後才刪；`.env` 全部寫完才改名，不會留下寫一半的設定）；從安裝目錄重跑更新時只打包程式（不含資料庫、`.env`），暫存檔用完刪除；`.env` 的值含 `$`、`#`、空白時自動加引號
+- 主機清單：每個版本匯入時就檢查能否比較；任何錯誤都記成失敗並移出放檔目錄（檔名加 `failed-`），不會卡住之後的同步；還沒有 OSV 時上傳的清單也會先匯入；`cli import-hosts` 把檔案放進放檔目錄、照先後順序處理並回報這個檔案的結果（比對失敗時結束代碼非 0）
+- 上傳的檔案先寫成 `.part` 再改名，同步途中不會讀到寫一半的檔案
+- 執行中 kernel 的推算改為 Landscape 與清單匯入共用（`kernel.infer_running`）
+- `collect-hosts.yml` 改成單一 play（可用 `--limit`）、連不上的主機略過並列出、暫存目錄一定刪除、預設輸出到家目錄
+- 已安裝的 `.env` 沒有 `HOST_SOURCE` 時仍是 `landscape`，原有部署不受影響；資料庫自動新增 `host_import` 表
 
 ## 0.8.1（code review 修正）
 - 主管摘要：期末後才釋出修正的 CVE 仍算「期末時尚未修正」，但不再列進「風險接受／持續追蹤」，改列「期末後才釋出修正（現在已可更新）」；數字卡與結論句另外標出數量
