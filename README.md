@@ -107,9 +107,9 @@ sudo bash /tmp/cvehub-src/*/install.sh
 UTF-8 的 CSV（Excel 存的有 BOM 也可以），第一列是欄位名稱、順序不限，之後**一列一個套件**；主機層級的欄位每列重複。
 
 ```
-hostname,release,pro,kernel_release,kernel_version,collected_at,package,version
-web01,22.04,no,6.8.0-49-generic,6.8.0-49.49~22.04.1,2026-11-02T01:00:00Z,openssl,3.0.2-0ubuntu1.18
-web01,22.04,no,6.8.0-49-generic,6.8.0-49.49~22.04.1,2026-11-02T01:00:00Z,libssl3:amd64,3.0.2-0ubuntu1.18
+hostname,ip,release,pro,kernel_release,kernel_version,collected_at,package,version
+web01,10.0.0.21,22.04,no,6.8.0-49-generic,6.8.0-49.49~22.04.1,2026-11-02T01:00:00Z,openssl,3.0.2-0ubuntu1.18
+web01,10.0.0.21,22.04,no,6.8.0-49-generic,6.8.0-49.49~22.04.1,2026-11-02T01:00:00Z,libssl3:amd64,3.0.2-0ubuntu1.18
 ```
 
 | 欄位 | 必要 | 內容 |
@@ -122,20 +122,21 @@ web01,22.04,no,6.8.0-49-generic,6.8.0-49.49~22.04.1,2026-11-02T01:00:00Z,libssl3
 | `kernel_release` | | 執行中 kernel：`uname -r` |
 | `kernel_version` | | 執行中 kernel 版本：`/proc/version_signature` 整行或其中的 `6.8.0-49.49~22.04.1` |
 | `collected_at` | | 收集時間（ISO 8601） |
-| `ip` | | 只用來顯示 |
+| `ip` | | 只用來顯示（總覽、主機頁）；`collect-hosts.yml` 預設填主機對外的主要 IPv4，可用 `-e cvehub_ip=…` 指定。格式不對時只略過 IP（匯入紀錄會註明），其他照常匯入 |
 
 - 只列**已安裝**的套件（dpkg 狀態第二個字元是 `i`；只剩設定檔的 `rc` 不列）。
 - 沒給 kernel 欄位時，用「最新安裝的 kernel」判斷；有給時，kernel 的 CVE 依執行中 kernel 判斷，並分出「重開機即可」與「要升級再重開」。
-- 一個檔案可以有很多台主機；中間重複的標題列會略過（每台各自產生的檔案可以直接串起來）。
+- 一個檔案可以有很多台主機；中間再出現的標題列會改用新的欄位對應（每台各自產生的檔案可以直接串起來，欄位順序不同也可以）。
 - 檔案裡沒有的主機保留上次的資料。若每次都上傳全部主機、希望沒列出的自動停用，`.env` 設 `HOSTS_FILE_MODE=replace`。
 - 和 Landscape 同步過的同名主機會接續原本的歷史。
+- 主機名稱是識別主機的依據，**兩台機器同名（例如兩個機房都有 `web01`）一定要先改成不同的名稱**：用 Ansible 時在 host_vars 設 `cvehub_hostname`（例 `web01-tpe`）；手動收集時把下面指令裡的 `$(hostname)` 換成自訂名稱。同一個名稱的資料出現不同的 IP、Ubuntu 版本、Pro、kernel 或收集時間（寫法不同但意思相同的不算，收集時間要完全相同，例如 `22.04` 和 `Ubuntu 22.04.5 LTS`），或有的列 IP 合法、有的列 IP 格式不對時，會整份不匯入並提示可能是同名；但這些欄位剛好都相同或空白時偵測不到，兩台的套件會被合併成一台（每個套件只留較新的版本，舊版本的弱點會漏掉）。
 
 **沒有 Ansible 時**，在每台主機執行，把輸出存成 `.csv`：
 ```bash
 . /etc/os-release
-echo "hostname,release,kernel_release,kernel_version,package,version"
+echo "hostname,ip,release,pro,kernel_release,kernel_version,collected_at,package,version"
 dpkg-query -W -f='${db:Status-Abbrev}\t${binary:Package}\t${Version}\n' \
-  | awk -F'\t' -v p="$(hostname),$VERSION_ID,$(uname -r),$(awk '{print $2}' /proc/version_signature)" 'substr($1,2,1)=="i" {print p "," $2 "," $3}'
+  | awk -F'\t' -v p="$(hostname),$(hostname -I | awk '{print $1}'),$VERSION_ID,,$(uname -r),$(awk '{print $2}' /proc/version_signature),$(date -u +%FT%TZ)" 'substr($1,2,1)=="i" {print p "," $2 "," $3}'
 ```
 
 除了網頁上傳，也可以把檔案放到 `/opt/cvehub/data/hosts-inbox/`（每 30 分鐘檢查），或用指令 `import-hosts`（附錄 E）。

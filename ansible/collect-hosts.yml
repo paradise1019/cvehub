@@ -12,6 +12,7 @@
 #   cvehub_hosts     要收集的主機（inventory 群組或樣式），預設 all
 #   cvehub_out       輸出檔，預設執行者家目錄下 cvehub-hosts-<日期時間>.csv
 #   cvehub_hostname  CSV 裡的主機名稱，預設 inventory 名稱
+#   cvehub_ip        CSV 裡的 IP（只用來顯示），預設這台主機對外的主要 IPv4（預設路由的來源位址，查不到時用 hostname -I 的第一個）
 
 - name: 收集主機清單給 cvehub
   hosts: "{{ cvehub_hosts | default('all') }}"
@@ -37,17 +38,23 @@
         if command -v pro >/dev/null 2>&1; then
           pro=$(pro status --format json 2>/dev/null | python3 -c 'import json,sys; print("yes" if json.load(sys.stdin).get("attached") else "no")' 2>/dev/null || true)
         fi
+        addr=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") {print $(i + 1); exit}}' || true)
+        [ -n "$addr" ] || addr=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
+        [ -z "${CVEHUB_IP:-}" ] || addr="$CVEHUB_IP"
+        # 擋掉會弄亂 CSV 的字元（逗號、引號、空白…）；是否為合法位址由 cvehub 匯入時檢查，不合法只會略過 IP
+        case "$addr" in *[!0-9A-Za-z.:%_-]*) echo "cvehub_ip／IP 含不合法的字元，這台不填 IP：$addr" >&2; addr="" ;; esac
         krel=$(uname -r)
         kver=$(awk '{print $2}' /proc/version_signature 2>/dev/null || true)
         now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-        echo "hostname,release,pro,kernel_release,kernel_version,collected_at,package,version"
+        echo "hostname,ip,release,pro,kernel_release,kernel_version,collected_at,package,version"
         # 狀態第二個字元是 i＝已安裝（含 hold 的套件）；rc（只剩設定檔）不列
         dpkg-query -W -f='${db:Status-Abbrev}\t${binary:Package}\t${Version}\n' \
-          | awk -F'\t' -v p="$HOST,$release,$pro,$krel,$kver,$now" 'substr($1,2,1)=="i" {print p "," $2 "," $3}'
+          | awk -F'\t' -v p="$HOST,$addr,$release,$pro,$krel,$kver,$now" 'substr($1,2,1)=="i" {print p "," $2 "," $3}'
       args:
         executable: /bin/bash
       environment:
         HOST: "{{ cvehub_hostname | default(inventory_hostname) }}"
+        CVEHUB_IP: "{{ cvehub_ip | default('') }}"
       register: cvehub_csv
       changed_when: false
       check_mode: false
@@ -71,7 +78,7 @@
           ansible.builtin.set_fact:
             cvehub_outfile: "{{ cvehub_out | default(lookup('env', 'HOME') ~ '/cvehub-hosts-' ~ lookup('pipe', 'date +%Y%m%d-%H%M%S') ~ '.csv') }}"
 
-        - name: 合併（每台主機的標題列會留著，cvehub 匯入時會略過重複的標題列）
+        - name: 合併（每台主機的標題列會留著，cvehub 匯入時會把檔案中間的標題列當成新的欄位對應）
           ansible.builtin.assemble:
             src: "{{ cvehub_tmp.path }}"
             dest: "{{ cvehub_outfile }}"

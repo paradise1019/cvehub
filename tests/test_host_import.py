@@ -196,6 +196,96 @@ class HostImportTest(unittest.TestCase):
         self.assertEqual(self.env.con.execute("SELECT COUNT(*) FROM host").fetchone()[0], 0)
         self.assertEqual([tuple(r) for r in self.env.con.execute("SELECT status FROM host_import")], [("failed",)])
 
+    def test_mixed_headers_from_old_and_new_collectors(self):
+        """舊版（沒有 ip）與新版 playbook、README 手動指令的檔案串在一起：中間的標題列改用新的對應"""
+        text = ("hostname,release,pro,kernel_release,kernel_version,collected_at,package,version\n"
+                "old01,24.04,,,,,openssl,3.0.13-0ubuntu3\n"
+                "hostname,ip,release,pro,kernel_release,kernel_version,collected_at,package,version\n"
+                "new01,10.0.0.21,24.04,,,,,openssl,3.0.13-0ubuntu3\n"
+                "Hostname,Release,Package,Version,IP\n"
+                "man01,24.04,curl,8.5.0-2ubuntu10,10.0.0.22\n")
+        h = host_import.parse(text)
+        self.assertEqual({k: (v["release"], v["ip"]) for k, v in h.items()},
+                         {"old01": ("24.04", ""), "new01": ("24.04", "10.0.0.21"), "man01": ("24.04", "10.0.0.22")})
+
+    def test_bad_ip_ignored_not_fatal(self):
+        for bad in ("10.0.0.1 x", "cafe", "10.0.0", "999.1.1.1", "0"):
+            h = host_import.parse("hostname,ip,release,package,version\nh,%s,24.04,openssl,3.0.13-0ubuntu3\n" % bad)["h"]
+            self.assertEqual((h["ip"], h["ip_bad"][0]), ("", bad), bad)
+        h = host_import.parse("hostname,ip,release,package,version\nh,2001:DB8::1,24.04,openssl,3.0.13-0ubuntu3\n"
+                              "h,2001:db8::1,24.04,curl,8.5.0-2ubuntu10\n")["h"]           # 不同寫法視為同一個
+        self.assertEqual(h["ip"], "2001:db8::1")
+        with self.assertRaises(host_import.ImportError_) as e:                      # 兩個合法但不同：可能是兩台同名
+            host_import.parse("hostname,ip,release,package,version\nh,10.0.0.1,24.04,openssl,3.0.13-0ubuntu3\n"
+                              "h,10.0.0.9,24.04,curl,8.5.0-2ubuntu10\n")
+        self.assertIn("同名", str(e.exception))
+        rows = ("h,,24.04,,a0,1\nh,10.0.0.1,24.04,2026-11-01T01:00:00Z,a1,1\n"           # 同名的第二台：IP 和收集時間都不同
+                + "".join("h,10.0.0.2,24.04,2026-11-01T02:00:00Z,p%d,1\n" % i for i in range(30)) + "x,,99.99,,b,1\n")
+        with self.assertRaises(host_import.ImportError_) as e:
+            host_import.parse("hostname,ip,release,collected_at,package,version\n" + rows)
+        msg = str(e.exception)
+        self.assertEqual(msg.count("同名"), 1)                                       # 每台只報一次
+        self.assertIn("和第 3 列不同", msg)                                          # 指向真正帶那個 IP 的列
+        self.assertIn("99.99", msg)                                                   # 其他主機的錯誤沒有被蓋掉
+        self.drop("hostname,ip,release,package,version\nweb01,10.0.0.21,24.04,openssl,3.0.13-0ubuntu3\n")
+        sync.run_sync(self.env.con)
+        self.drop("hostname,ip,release,package,version\nweb01,cafe,24.04,openssl,3.0.13-0ubuntu3\n", "second.csv")
+        sync.run_sync(self.env.con)
+        r = self.env.con.execute("SELECT status, message FROM host_import ORDER BY id DESC").fetchone()
+        self.assertEqual(r["status"], "ok")
+        self.assertIn("web01", r["message"])
+        self.assertEqual(self.env.con.execute("SELECT ip FROM host WHERE hostname='web01'").fetchone()[0], "10.0.0.21")   # 保留原本的
+        with self.assertRaises(host_import.ImportError_):     # 資料中間的 U+FEFF 不會被默默拿掉
+            host_import.parse("hostname,release,package,version\nweb\ufeff01,24.04,openssl,3.0.13-0ubuntu3\n")
+
+    def test_same_value_in_different_forms_is_not_a_conflict(self):
+        text = ("hostname,release,pro,kernel_release,kernel_version,collected_at,package,version\n"
+                "h,22.04,yes,6.8.0-49-generic,Ubuntu 6.8.0-49.49~22.04.1-generic 6.8.12,2026-11-01T01:00:00Z,openssl,3.0.2-0ubuntu1.18\n"
+                "h,Ubuntu 22.04.5 LTS,true,6.8.0-49-generic,6.8.0-49.49~22.04.1,2026-11-01T01:00:00Z,curl,7.81.0-1ubuntu1.20\n")
+        Config.UBUNTU_RELEASES = ["22.04", "24.04"]
+        h = host_import.parse(text)["h"]
+        self.assertEqual((h["release"], h["pro"], h["kernel_version"]), ("22.04", 1, "6.8.0-49.49~22.04.1"))
+
+    def test_valid_and_bad_ip_on_one_host_is_a_conflict(self):
+        with self.assertRaises(host_import.ImportError_) as e:
+            host_import.parse("hostname,ip,release,package,version\nh,10.0.0.1,24.04,openssl,3.0.13-0ubuntu3\n"
+                              "h,bad,24.04,curl,8.5.0-2ubuntu10\n")
+        self.assertIn("同名", str(e.exception))
+
+    def test_two_different_bad_ips_conflict(self):
+        with self.assertRaises(host_import.ImportError_) as e:
+            host_import.parse("hostname,ip,release,package,version\nh,cafe,24.04,openssl,3.0.13-0ubuntu3\n"
+                              "h,dead,24.04,curl,8.5.0-2ubuntu10\n")
+        self.assertIn("同名", str(e.exception))
+        h = host_import.parse("hostname,ip,release,package,version\nh,cafe,24.04,openssl,3.0.13-0ubuntu3\n"
+                              "h,cafe,24.04,curl,8.5.0-2ubuntu10\n")["h"]           # 同一個錯誤 IP：只略過
+        self.assertEqual(h["ip"], "")
+
+    def test_two_snapshots_of_one_host_rejected(self):
+        """同一台主機新舊兩次收集的檔案串在一起：不能合併（舊檔裡已移除的套件會被誤報）"""
+        with self.assertRaises(host_import.ImportError_) as e:
+            host_import.parse("hostname,release,collected_at,package,version\n"
+                              "h,24.04,2026-01-01T00:00:00Z,oldpkg,1.0\nh,24.04,2026-11-01T00:00:00Z,openssl,3.0.13-0ubuntu3\n")
+        self.assertIn("兩次收集", str(e.exception))
+        h = host_import.parse("hostname,release,collected_at,package,version\n"     # 同一次收集：同一個字串
+                              "h,24.04,2026-11-01T00:00:00Z,a,1.0\nh,24.04,2026-11-01T00:00:00Z,b,1.0\n")["h"]
+        self.assertEqual(len(h["packages"]), 2)
+
+    def test_field_error_points_at_the_row_that_set_it(self):
+        with self.assertRaises(host_import.ImportError_) as e:
+            host_import.parse("hostname,release,collected_at,package,version\nh,24.04,,a,1\nh,24.04,,b,1\nh,24.04,garbage,c,1\n")
+        self.assertIn("第 4 列", str(e.exception))
+
+    def test_ip_placeholders(self):
+        h = host_import.parse("hostname,ip,release,package,version\nh,N/A,24.04,openssl,3.0.13-0ubuntu3\n"
+                              "h,-,24.04,curl,8.5.0-2ubuntu10\nh,n/a,24.04,less,590-2\n")["h"]
+        self.assertEqual((h["ip"], h.get("ip_bad")), ("", None))
+
+    def test_bom_in_middle_header(self):
+        text = ('\ufeffhostname,release,package,version\na,24.04,openssl,3.0.13-0ubuntu3\n'
+                '\ufeff"hostname","release","package","version"\n"b","24.04","curl","8.5.0-2ubuntu10"\n')
+        self.assertEqual(sorted(host_import.parse(text)), ["a", "b"])
+
     def test_multiarch_takes_newer(self):
         h = host_import.parse("hostname,release,package,version\nh,24.04,libc6:amd64,2.39-0ubuntu8.4\nh,24.04,libc6:i386,2.39-0ubuntu8.3\n")["h"]
         self.assertEqual(h["packages"], {"libc6": "2.39-0ubuntu8.4"})

@@ -87,6 +87,8 @@ def main(argv=None):
             print("匯入失敗：%s" % (r["message"] or "狀態 %s，請看容器 log" % r["status"]), file=sys.stderr)
             return 1
         print("匯入完成：主機 %d、套件 %d、停用 %d" % (r["hosts"], r["packages"], r["deactivated"]))
+        if r["message"]:
+            print("注意：%s" % r["message"])
         if sync_error:
             print("比對失敗：%s" % sync_error, file=sys.stderr)
             return 1
