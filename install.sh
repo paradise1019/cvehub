@@ -8,7 +8,7 @@
 #   - 目錄裡還沒有 cvehub → 全新安裝：問幾個問題、寫 .env、建 image、跑測試、建管理員、啟動
 #   - 上次安裝中途失敗   → 沿用已寫好的 .env，從建 image 接著做（改過 .env 再重跑即可）
 #   - 已經裝過           → 交給 scripts/upgrade.sh 更新（自動備份、測試，失敗還原；.env 與資料不動）
-#   -y：不詢問，全部用預設值（或事先設定的環境變數，見下方 ask 的變數名稱）
+#   -y：不詢問，全部用預設值（或事先設定的環境變數，見下方 ask 的變數名稱，例：sudo WEB_HOST_PORT=8081 bash install.sh -y）
 #
 # 主機不需要能 docker pull：基礎 image（預設 python:3.12-slim）要先 docker load 進來，
 # Python 套件從 PIP_INDEX_URL（例如內部 Nexus）安裝。
@@ -59,14 +59,54 @@ PY
 # 讀 .env 的一個設定（去掉引號）；續裝時用
 get_env() {
     KEY="$1" python3 - "$APP_DIR/.env" <<'PY'
-import os, sys
+import os, re, sys
 k = os.environ["KEY"]
-for l in open(sys.argv[1], encoding="utf-8"):
+val = None
+for l in open(sys.argv[1], encoding="utf-8"):     # 和 docker compose 一樣：同一個設定寫了好幾行時用最後一行
+    l = l.strip()
+    l = re.sub(r"^export\s+", "", l)
     if l.startswith(k + "="):
         v = l.split("=", 1)[1].strip()
-        print(v[1:-1] if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"" else v, end="")
-        break
+        if len(v) >= 2 and v[0] in "'\"" and v[0] in v[1:]:
+            v = v[1:v.index(v[0], 1)]               # 引號內的值（後面的註解不算）
+        else:
+            v = v.split(" #", 1)[0].strip()         # 和 docker compose 一樣：沒有引號時「 #」之後是註解
+        val = v
+if val is not None:
+    print(val, end="")
 PY
+}
+
+# 主機 port 是否已被其他程式使用（接受 8081 或 127.0.0.1:8081）
+port_busy() {
+    # 這個 port 是否已被使用：主機上在聽的程式，或 docker 容器發布的 port（userland-proxy 關掉時 ss 看不到）
+    # 指定了 IP 時，只有同一個 IP 或「全部位址」上的才算衝突
+    [[ "$1" == \[* ]] && return 1                   # IPv6（更新時從舊設定搬來的）：不檢查，啟動失敗時會提示
+    local p=$((10#${1##*:})) ip="" addr
+    [[ "$1" == *:* ]] && ip="${1%:*}"
+    conflict() {   # $1＝已在使用的位址（IP:port）
+        local a="${1%:*}"
+        [[ -z "$ip" || "$ip" == 0.0.0.0 || "$a" == "$ip" || "$a" == 0.0.0.0 || "$a" == "*" || "$a" == "[::]" || "$a" == "::" ]]
+    }
+    if command -v ss >/dev/null; then
+        while read -r addr; do conflict "$addr" && return 0; done < <(ss -ltnH "sport = :$p" 2>/dev/null | awk '{print $4}')
+    fi
+    while read -r addr; do
+        [[ "${addr##*:}" == "$p" ]] && conflict "$addr" && return 0
+    done < <(docker ps --format '{{.Ports}}' 2>/dev/null | tr ',' '\n' | sed -nE 's#^ *([^ ]+:[0-9]+)->[0-9]+/tcp.*#\1#p')
+    return 1
+}
+
+valid_port() {
+    # 8081 或 <這台主機的 IPv4>:8081（0.0.0.0、127.x.x.x 也可以）
+    [[ "$1" =~ ^(([0-9]{1,3}\.){3}[0-9]{1,3}:)?[0-9]{1,5}$ ]] || return 1
+    (( 10#${1##*:} >= 1 && 10#${1##*:} <= 65535 )) || return 1
+    [[ "$1" == *:* ]] || return 0
+    local ip="${1%:*}" o
+    for o in ${ip//./ }; do (( 10#$o <= 255 )) || return 1; done
+    [[ "$ip" == 0.0.0.0 || "$ip" == 127.* ]] && return 0
+    command -v ip >/dev/null || return 0                       # 沒有 ip 指令：無法檢查，交給 docker
+    ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -qxF "$ip"
 }
 
 # 安裝目錄裡屬於使用者的設定、資料與安裝狀態：複製程式、打包更新檔時都不碰（只有這一份清單）
@@ -127,6 +167,8 @@ if [[ -f "$APP_DIR/.env" && -e "$INCOMPLETE" ]]; then
     BASE_IMAGE="$(get_env BASE_IMAGE)"; BASE_IMAGE="${BASE_IMAGE:-python:3.12-slim}"
     PIP_INDEX_URL="$(get_env PIP_INDEX_URL)"
     HOST_SOURCE="$(get_env HOST_SOURCE)"
+    WEB_HOST_PORT="$(get_env WEB_HOST_PORT)"; WEB_HOST_PORT="${WEB_HOST_PORT:-8080}"
+    [[ "$WEB_HOST_PORT" == \[* ]] || valid_port "$WEB_HOST_PORT" || die ".env 的 WEB_HOST_PORT 不正確：$WEB_HOST_PORT（例：8081、127.0.0.1:8081）；修正後重新執行：sudo bash $APP_DIR/install.sh"
     mkdir -p config data
     chown -R 10001 data
 else
@@ -142,6 +184,22 @@ else
     [[ "$HOST_SOURCE" == file || "$HOST_SOURCE" == landscape ]] || die "主機來源只能是 file 或 landscape"
     ask UBUNTU_RELEASES  "要比對的 Ubuntu 版本（逗號分隔）" "20.04,22.04,24.04"
     ask TZ_SET           "時區" "Asia/Taipei"
+    while :; do
+        ask WEB_HOST_PORT "網頁的 port（瀏覽器連 http://<主機>:<port>/；只給本機反向代理連時寫 127.0.0.1:8080）" "8080"
+        if valid_port "$WEB_HOST_PORT"; then                      # 08081 → 8081（先正規化再檢查）
+            p=$((10#${WEB_HOST_PORT##*:}))
+            [[ "$WEB_HOST_PORT" == *:* ]] && WEB_HOST_PORT="${WEB_HOST_PORT%:*}:$p" || WEB_HOST_PORT="$p"
+        fi
+        if ! valid_port "$WEB_HOST_PORT"; then
+            say "   ❌ 格式不對，或 IP 不是這台主機的：$WEB_HOST_PORT（例：8081、127.0.0.1:8081）"
+        elif port_busy "$WEB_HOST_PORT"; then
+            say "   ❌ port ${WEB_HOST_PORT##*:} 已經被其他程式使用（sudo ss -ltnp 'sport = :${WEB_HOST_PORT##*:}' 可以看是誰），請換一個"
+        else
+            break
+        fi
+        [[ $YES == 1 ]] && die "請用環境變數指定沒被使用的 port，例：sudo WEB_HOST_PORT=<port> bash $0 -y"
+        WEB_HOST_PORT=""
+    done
     ask BASE_IMAGE       "基礎 image（要先 docker load 進來）" "python:3.12-slim"
     ask PIP_INDEX_URL    "Python 套件來源（內部 Nexus 的 PyPI proxy，或 pypi.org）" "https://pypi.org/simple"
     ask PIP_TRUSTED_HOST "套件來源是自簽憑證時填它的主機名稱（否則留空）" ""
@@ -160,6 +218,7 @@ else
     set_env HOST_SOURCE "$HOST_SOURCE"
     set_env UBUNTU_RELEASES "$UBUNTU_RELEASES"
     set_env TZ "$TZ_SET"
+    set_env WEB_HOST_PORT "$WEB_HOST_PORT"
     set_env BASE_IMAGE "$BASE_IMAGE"
     set_env PIP_INDEX_URL "$PIP_INDEX_URL"
     set_env PIP_TRUSTED_HOST "$PIP_TRUSTED_HOST"
@@ -213,8 +272,11 @@ else
         || say "   ⚠️ 沒有建立成功；之後可執行：cd $APP_DIR && sudo docker compose run --rm --no-deps cvehub python -m cvehub.cli user-add admin admin"
 fi
 
-step "7/7 啟動"
-docker compose up -d
+step "7/7 啟動（port $WEB_HOST_PORT）"
+if [[ -z "$(docker compose ps -q cvehub 2>/dev/null)" ]] && port_busy "$WEB_HOST_PORT"; then
+    die "port ${WEB_HOST_PORT##*:} 已經被其他程式使用；改 $APP_DIR/.env 的 WEB_HOST_PORT（例：WEB_HOST_PORT=8081）後重新執行：sudo bash $APP_DIR/install.sh"
+fi
+docker compose up -d || die "啟動失敗（訊息如上）。port 的問題（被佔用、IP 不對）請改 $APP_DIR/.env 的 WEB_HOST_PORT 後重新執行：sudo bash $APP_DIR/install.sh"
 for _ in $(seq 1 60); do
     st="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose ps -q cvehub)" 2>/dev/null || true)"
     [[ "$st" == healthy ]] && break
@@ -223,11 +285,11 @@ done
 [[ "${st:-}" == healthy ]] || die "容器 3 分鐘內沒有變成 healthy，請看：cd $APP_DIR && sudo docker compose logs"
 rm -f -- "$INCOMPLETE"                        # 之後再執行 install.sh 就是更新
 
-port="$(docker compose port cvehub 8080 2>/dev/null | sed 's/.*://')"
+port="$(docker compose port cvehub 8080 2>/dev/null | head -1 | sed 's/.*://' || true)"      # 實際發布的 port（含 override）
 cat <<EOF
 
 ✅ cvehub $VERSION 已安裝並啟動
-   網頁：http://$(hostname -I | awk '{print $1}'):${port:-8080}/
+   網頁：http://$([[ "$WEB_HOST_PORT" == *:* && "${WEB_HOST_PORT%:*}" != 0.0.0.0 && "$WEB_HOST_PORT" != \[* ]] && echo "${WEB_HOST_PORT%:*}" || hostname -I | awk '{print $1}'):${port:-${WEB_HOST_PORT##*:}}/
 
 接下來（都在網頁「資料匯入」頁，用管理員登入）：
    1. 上傳 osv-all.tar.xz 與 vex-all.tar.xz（在能上網的電腦下載）

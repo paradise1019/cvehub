@@ -3,6 +3,7 @@ import datetime
 import hmac
 import logging
 import os
+import re
 import secrets
 import threading
 import time
@@ -44,6 +45,14 @@ def run_job(kind, path=None):
             _sync_lock.release()
     threading.Thread(target=work, daemon=True).start()
     return True
+
+
+def cookie_name():
+    """session cookie 名稱（瀏覽器的 cookie 不分 port：主機 port 不是 8080 時帶上 port，避免和同主機的其他網站衝突）"""
+    if Config.WEB_COOKIE_NAME:
+        return Config.WEB_COOKIE_NAME
+    port = (Config.WEB_HOST_PORT or "8080").rsplit(":", 1)[-1]
+    return "cvehub_session" if port == "8080" else "cvehub_session_" + re.sub(r"[^A-Za-z0-9]", "_", port)
 
 
 def _save_complete(f, dest):
@@ -96,7 +105,7 @@ def create_app(start_scheduler=True):
     auth.bootstrap(con)
     con.close()
     app.secret_key = auth.secret_key()
-    app.config.update(SESSION_COOKIE_NAME="cvehub_session", SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
+    app.config.update(SESSION_COOKIE_NAME=cookie_name(), SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
                       SESSION_COOKIE_SECURE=Config.WEB_COOKIE_SECURE or bool(Config.WEB_TLS_CERT))
 
     def _safe_next(target):

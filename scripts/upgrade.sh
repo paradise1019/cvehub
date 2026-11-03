@@ -51,6 +51,11 @@ for a in "$@"; do
 done
 set -- "${ARGS[@]+"${ARGS[@]}"}"
 
+# 一律以 .env 為準：docker compose 內插時，殼層的同名變數（即使是空值）會蓋過 .env，這次和下次重建就會用不同的值
+for _v in WEB_HOST_PORT BASE_IMAGE PIP_INDEX_URL PIP_TRUSTED_HOST BUILD_HTTP_PROXY BUILD_HTTPS_PROXY BUILD_NO_PROXY; do
+    if [[ -v $_v ]]; then printf '%s\n' "⚠️  不使用環境變數 $_v（設定請改 .env）"; unset "$_v"; fi
+done
+
 APP_DIR="${CVEHUB_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 APP_DIR="$(cd "$APP_DIR" 2>/dev/null && pwd)" || die "找不到安裝目錄"
 [[ "$APP_DIR" == /* && "$APP_DIR" != "/" ]] || die "安裝目錄不正確：$APP_DIR"
@@ -317,6 +322,39 @@ prune_backups() {   # 只保留最近 KEEP_BACKUPS 份（每份含資料庫，�
     done || true
 }
 
+HOST_PORT_FROM_OLD=""
+check_host_port() {   # 更新前檢查：0.9.0 以前 port 寫死在 docker-compose.yml，手動改過的要搬到 .env 的 WEB_HOST_PORT
+    grep -qE '^[[:space:]]*(export[[:space:]]+)?WEB_HOST_PORT=' "$APP_DIR/.env" && return 0      # 已經設定：以 .env 為準
+    local cfg r err
+    err="$(mktemp)"
+    TMP_DIRS+=("$err")                 # 結束時一併刪除
+    cfg="$(cd "$APP_DIR" && docker compose -f docker-compose.yml config --format json 2>"$err")" \
+        || die "無法讀取舊的 docker-compose.yml（$(head -c 300 "$err")）；目前沒有做任何變更"
+    r="$(printf '%s' "$cfg" | python3 -c '
+import json, sys
+ports = (json.load(sys.stdin)["services"].get("cvehub") or {}).get("ports") or []
+desc = " ".join("%s:%s->%s" % (p.get("host_ip", ""), p.get("published", ""), p.get("target", "")) for p in ports) or "沒有 ports"
+if len(ports) != 1 or int(ports[0].get("target", 0)) != 8080 or not str(ports[0].get("published", "")):
+    print("ambiguous " + desc); sys.exit()
+ip, pub = ports[0].get("host_ip", ""), str(ports[0]["published"])
+ip = "[%s]" % ip if ":" in ip else ip
+print("ok " + ("%s:%s" % (ip, pub) if ip else pub))
+')" || r="ambiguous 解析失敗"
+    case "$r" in
+        "ok 8080") ;;
+        ok\ ?*) HOST_PORT_FROM_OLD="${r#ok }" ;;
+        *)      die "舊的 docker-compose.yml 的 ports 無法自動搬移（${r#ambiguous }）。新版的主機 port 改在 .env 設定：
+   請先在 $APP_DIR/.env 加一行 WEB_HOST_PORT=<主機 port>（例 8081、127.0.0.1:8081），再重新執行更新；
+   要多個 port、或不要對外發布 port，請寫在 docker-compose.override.yml（不發布：ports: !reset []，需要 Docker Compose 2.24 以上）。目前沒有做任何變更" ;;
+    esac
+}
+
+migrate_host_port() {   # 換程式前把舊 docker-compose.yml 的 port 寫進 .env（check_host_port 已確認過）
+    [[ -n "$HOST_PORT_FROM_OLD" ]] || return 0
+    printf '\n# 網頁的主機 port（更新時從舊的 docker-compose.yml 搬過來）\nWEB_HOST_PORT=%s\n' "$HOST_PORT_FROM_OLD" >> "$APP_DIR/.env"
+    out "ℹ️  舊的 docker-compose.yml 用的 port $HOST_PORT_FROM_OLD 已寫進 .env 的 WEB_HOST_PORT"
+}
+
 upgrade() {
     local zip="$1" tmp src old new ts bk
     [[ -f "$zip" ]] || die "找不到檔案：$zip"
@@ -347,6 +385,7 @@ upgrade() {
         out "$(head -n 30 "$src/CHANGELOG.md")"
         out "-----------------------------------------"
     fi
+    check_host_port
     confirm "開始更新？（約 5–10 分鐘；中間會停機約 1 分鐘）"
 
     ts="$(date +%Y%m%d-%H%M%S)"
@@ -381,6 +420,7 @@ upgrade() {
     PHASE=code
 
     info "2/6 替換程式檔（.env、data/、config/ 不動）"
+    migrate_host_port
     remove_code
     local it
     for it in "${CODE_ITEMS[@]}"; do

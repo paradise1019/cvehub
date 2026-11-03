@@ -79,7 +79,11 @@ class Config:
     HISTORY_KEEP_DAYS = _i("HISTORY_KEEP_DAYS", 365)
 
     WEB_LISTEN = _s("WEB_LISTEN", "0.0.0.0")
-    WEB_PORT = _i("WEB_PORT", 8080)
+    WEB_PORT = _i("WEB_PORT", 8080)                    # 容器內部的 port（健康檢查固定連 8080，不要改）
+    WEB_HOST_PORT = _s("WEB_HOST_PORT", "8080")        # 主機上的 port（docker-compose.yml 使用；可寫 127.0.0.1:8080）
+    # session cookie 名稱：瀏覽器的 cookie 不分 port，同一台主機有別的網站（例如另一套 cvehub）時會互相蓋掉
+    # 留空＝主機 port 是 8080 時用 cvehub_session，否則 cvehub_session_<port>
+    WEB_COOKIE_NAME = _s("WEB_COOKIE_NAME")
     WEB_AUTH_USER = _s("WEB_AUTH_USER", "admin")        # 舊版單一帳號：沒有任何帳號時自動轉成第一個管理員
     WEB_SECRET_KEY = _s("WEB_SECRET_KEY")              # session 簽章金鑰；留空＝自動產生在資料目錄（.secret_key）
     WEB_SESSION_IDLE_MINUTES = _i("WEB_SESSION_IDLE_MINUTES", 60)

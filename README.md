@@ -53,6 +53,7 @@ sudo bash /tmp/cvehub-src/*/install.sh
 | 主機來源 | `file` | `file`＝匯入主機清單；`landscape`＝接 Landscape（會再問網址與金鑰） |
 | Ubuntu 版本 | `20.04,22.04,24.04` | 你的主機有用到的版本 |
 | 時區 | `Asia/Taipei` | |
+| 網頁的 port | `8080` | 被其他程式佔用時會請你換一個；只給本機反向代理連時填 `127.0.0.1:8080` |
 | 基礎 image | `python:3.12-slim` | 步驟 1 載入的名稱 |
 | Python 套件來源 | `https://pypi.org/simple` | 內部 Nexus 填它的 PyPI proxy，例 `https://nexus.example.com/repository/pypi-proxy/simple` |
 | 自簽憑證的主機名稱 | 空白 | Nexus 是自簽憑證才填，例 `nexus.example.com` |
@@ -62,12 +63,13 @@ sudo bash /tmp/cvehub-src/*/install.sh
 ✅ 最後印出「cvehub x.y.z 已安裝並啟動」和網址。
 
 - 安裝到別的目錄：`sudo CVEHUB_DIR=/srv/cvehub bash …/install.sh`
-- 不詢問、全用預設值：加 `-y`（管理員之後再建，指令會印出來）
+- 不詢問、全用預設值：加 `-y`（管理員之後再建，指令會印出來）；要指定值時用環境變數，例 `sudo WEB_HOST_PORT=8081 bash …/install.sh -y`（只在全新安裝時有效）
+- 之後要換 port：改 `.env` 的 `WEB_HOST_PORT`，`cd /opt/cvehub && sudo docker compose up -d`（不要改 `docker-compose.yml`，更新時會被換掉）
 - ❌ 拿不到基礎 image：回到步驟 1。❌ 建置失敗：檢查 Nexus 網址、自簽憑證主機名稱（`sudo nano /opt/cvehub/.env`），修正後重新執行 `sudo bash /opt/cvehub/install.sh`（會沿用 `.env` 接著做，不會再問）。
 
 ## 3. 開始使用
 
-瀏覽器開 `http://<主機>:8080/`，用管理員登入。
+瀏覽器開 `http://<主機>:<port>/`（安裝結束時印出的網址），用管理員登入。
 
 ### 3.1 匯入漏洞資料（OSV、VEX 兩份一起）
 1. 在能上網的電腦下載：
@@ -199,7 +201,7 @@ cd /opt/cvehub && sudo docker compose exec -T cvehub python -c "import sqlite3; 
 
 登入密碼會經過網路，正式使用請用 HTTPS，二擇一：
 
-**放在既有的反向代理後面（建議）**：`docker-compose.yml` 的 ports 改成 `"127.0.0.1:8080:8080"`，`.env` 設 `WEB_COOKIE_SECURE=true`。nginx 範例：
+**放在既有的反向代理後面（建議）**：`.env` 設 `WEB_HOST_PORT=127.0.0.1:8080`（只讓本機的代理連）、`WEB_COOKIE_SECURE=true`，`sudo docker compose up -d`。nginx 範例：
 ```nginx
 server {
     listen 443 ssl;
@@ -273,6 +275,7 @@ cd /opt/cvehub && sudo docker compose run --rm --no-deps -T cvehub python -m uni
 
 | 狀況 | 處理 |
 |---|---|
+| 登入一直顯示「表單已過期，請重新整理頁面」 | 瀏覽器沒有帶回 cvehub 的 cookie。最常見：用同一個主機名稱／IP 連的另一個網站（例如另一個 port 上的另一套 cvehub）有同名 cookie——瀏覽器的 cookie 不分 port，會互相蓋掉；對方是 HTTPS 時，它的 cookie 還會擋住這邊的。0.9.1 起 `.env` 的 `WEB_HOST_PORT` 不是 8080 時，cookie 名稱自動帶上 port；用 `docker-compose.override.yml` 改 port 的，請在 `.env` 設 `WEB_COOKIE_NAME`（例 `cvehub_session_b`）。改完要重新登入；暫時的做法是用無痕視窗。另外確認用 HTTP 連線時 `WEB_COOKIE_SECURE` 是 `false` |
 | 主機清單匯入失敗 | 「資料匯入」頁列出錯誤與列號；常見：缺 `release`、版本不在安裝時填的清單、同一台主機的 `release` 前後不一致 |
 | OSV 匯入「某版本的資料筆數不足」 | 先確認 `UBUNTU_RELEASES` 沒設錯；沒錯的話可能是 Canonical 改了版本名稱（`cvehub/osv_import.py` 的 `wanted_ecosystems()`） |
 | VEX「無法辨識」不是 0 | Canonical 改了說明文字；在 `cvehub/vex_import.py` 的 `classify()` 加對應，跑測試後重新匯入 |

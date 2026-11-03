@@ -79,6 +79,19 @@ class WebTest(unittest.TestCase):
             busy.close()
             Config.HOST_SOURCE = "landscape"
 
+    def test_cookie_name_follows_host_port(self):
+        from cvehub import web
+        saved = (Config.WEB_HOST_PORT, Config.WEB_COOKIE_NAME)
+        try:
+            for port, want in (("8080", "cvehub_session"), ("8081", "cvehub_session_8081"),
+                               ("127.0.0.1:9000", "cvehub_session_9000"), ("", "cvehub_session")):
+                Config.WEB_HOST_PORT, Config.WEB_COOKIE_NAME = port, ""
+                self.assertEqual(web.cookie_name(), want)
+            Config.WEB_COOKIE_NAME = "mine"
+            self.assertEqual(web.cookie_name(), "mine")
+        finally:
+            Config.WEB_HOST_PORT, Config.WEB_COOKIE_NAME = saved
+
     def test_requires_login(self):
         anon = self.app.test_client()
         r = anon.get("/period?from=2026-01-01&to=2026-01-31")

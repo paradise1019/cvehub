@@ -2,6 +2,12 @@
 
 更新方式見 README「6. 更新、回復、備份」：解開新版 zip，`sudo bash <解開的目錄>/install.sh`。
 
+## 0.9.1
+- 網頁的主機 port 改成 `.env` 的 `WEB_HOST_PORT`（安裝時會問、會檢查是否被佔用；可寫 `127.0.0.1:8080`），不用再改 `docker-compose.yml`
+- 更新時，舊版 `docker-compose.yml` 手動改過的 port（含指定 IP、長格式）會自動寫進 `.env` 的 `WEB_HOST_PORT`，不會變回 8080；`.env` 已經有 `WEB_HOST_PORT` 時以它為準；ports 有多筆、看不懂時，更新前就停下來請你先設定（不會做任何變更）
+- 更新時不使用殼層的 `WEB_HOST_PORT`、`BASE_IMAGE`、`PIP_*`、`BUILD_*` 環境變數，一律以 `.env` 為準
+- 修正：同一台主機還有別的網站（例如另一套 cvehub）時，登入一直顯示「表單已過期」。瀏覽器的 cookie 不分 port，同名 cookie 會互相蓋掉；主機 port 不是 8080 時 cookie 名稱改成 `cvehub_session_<port>`，也可以用 `WEB_COOKIE_NAME` 自訂（用 `docker-compose.override.yml` 改 port 時請設這個；換名稱後要重新登入一次）
+
 ## 0.9.0
 - 新增主機清單匯入（`HOST_SOURCE=file`）：不接 Landscape，改用 CSV 提供主機、Ubuntu 版本、已安裝套件（選填 Pro、執行中 kernel）；網頁上傳、放檔目錄、`cvehub.cli import-hosts` 三種方式（README 3.1）
 - 附 `ansible/collect-hosts.yml`：唯讀收集各主機的套件與 kernel，合併成一個 CSV
