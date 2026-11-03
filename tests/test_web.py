@@ -379,5 +379,100 @@ class AuthTest(unittest.TestCase):
         self.assertEqual(oct(os.stat(path).st_mode & 0o777), "0o600")
 
 
+class LoginFlowTest(unittest.TestCase):
+    """真的瀏覽器會自己發的請求（/favicon.ico、/.well-known/…）不能換掉登入頁的 CSRF token"""
+    setUp = WebTest.setUp
+    tearDown = WebTest.tearDown
+
+    def page_token(self, r):
+        return re.search(r'name="csrf" value="([^"]+)"', r.get_data(as_text=True)).group(1)
+
+    def submit(self, client, tok, password="correct horse battery"):
+        return client.post("/login", data={"csrf": tok, "username": "admin", "password": password, "next": "/"},
+                           headers={"Origin": "http://localhost"})
+
+    def test_browser_side_requests_do_not_break_login(self):
+        b = self.app.test_client()
+        tok = self.page_token(b.get("/login"))
+        self.assertEqual(b.get("/favicon.ico").status_code, 404)
+        self.assertEqual(b.get("/.well-known/appspecific/com.chrome.devtools.json").status_code, 404)
+        self.assertEqual(b.get("/robots.txt").status_code, 404)
+        r = self.submit(b, tok)
+        self.assertEqual((r.status_code, r.headers["Location"]), (302, "/"))
+
+    def test_unknown_path_is_404_without_touching_session(self):
+        b = self.app.test_client()
+        b.get("/login")
+        with b.session_transaction() as s:
+            before = s["csrf"]
+        r = b.get("/no-such-page")
+        self.assertEqual(r.status_code, 404)
+        self.assertNotIn("Set-Cookie", r.headers)
+        with b.session_transaction() as s:
+            self.assertEqual(s["csrf"], before)
+
+    def test_stale_login_page_shows_form_again(self):
+        b = self.app.test_client()
+        b.get("/login")
+        with self.assertLogs("cvehub.web", "WARNING") as logs:
+            r = self.submit(b, "old-token-from-a-cached-page")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("登入頁已過期", r.get_data(as_text=True))
+        self.assertIn("不一致", logs.output[0])
+        self.assertEqual(self.submit(b, self.page_token(r)).status_code, 302)      # 再送一次就成功
+
+    def test_csrf_failure_reasons_logged(self):
+        b = self.app.test_client()                                                  # 沒有 cookie
+        with self.assertLogs("cvehub.web", "WARNING") as logs:
+            r = self.submit(b, "x")
+        self.assertIn("沒有送出 cookie", logs.output[0])
+        self.assertIn("cookie", r.get_data(as_text=True))
+        b.set_cookie(self.app.config["SESSION_COOKIE_NAME"], "not-a-valid-signed-value")   # cookie 解不開
+        with self.assertLogs("cvehub.web", "WARNING") as logs:
+            self.submit(b, "x")
+        self.assertIn("無法使用", logs.output[0])
+
+    def test_secure_cookie_over_http_explains(self):
+        self.app.config["SESSION_COOKIE_SECURE"] = True
+        b = self.app.test_client()                         # 真的瀏覽器不會在 http 送出 Secure cookie：這裡直接不帶 cookie
+        with self.assertLogs("cvehub.web", "WARNING"):
+            r = self.submit(b, "x")
+        self.assertIn("WEB_COOKIE_SECURE", r.get_data(as_text=True))
+
+    def test_expired_login_gets_new_token(self):
+        with self.c.session_transaction() as s:
+            s["seen"] = 0
+            tok = s["csrf"]
+        self.assertEqual(self.c.get("/").status_code, 302)
+        r = self.c.get("/login")
+        self.assertNotEqual(self.page_token(r), tok)           # 登入時期的 token 不沿用到登入頁
+        self.assertEqual(self.submit(self.c, self.page_token(r)).status_code, 302)
+
+    def test_expired_login_then_login_page_and_other_tab(self):
+        with self.c.session_transaction() as s:
+            s["seen"] = 0                                      # 登入逾時
+        tok = self.page_token(self.c.get("/login"))            # 直接開登入頁（書籤）
+        self.assertEqual(self.c.get("/findings").status_code, 302)   # 另一個分頁同時載入
+        self.assertEqual(self.submit(self.c, tok).status_code, 302)
+
+    def test_anonymous_request_leaves_session_alone(self):
+        b = self.app.test_client()
+        tok = self.page_token(b.get("/login"))
+        r = b.get("/findings")                                 # 未登入看別的頁面：轉到登入頁，但不送 Set-Cookie
+        self.assertEqual(r.status_code, 302)
+        self.assertNotIn("Set-Cookie", r.headers)
+        self.assertEqual(self.submit(b, tok).status_code, 302)
+
+    def test_wrong_method_still_requires_login(self):
+        b = self.app.test_client()
+        self.assertEqual(b.get("/logout").status_code, 302)    # 405 之前先要求登入，不透露網址存在
+
+    def test_no_store(self):
+        for path in ("/login", "/", "/healthz"):
+            self.assertEqual(self.c.get(path).headers.get("Cache-Control"), "no-store", path)
+        self.assertIn('rel="icon" href="data:,"', self.c.get("/").get_data(as_text=True))
+
+
 if __name__ == "__main__":
     unittest.main()
+

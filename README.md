@@ -275,7 +275,7 @@ cd /opt/cvehub && sudo docker compose run --rm --no-deps -T cvehub python -m uni
 
 | 狀況 | 處理 |
 |---|---|
-| 登入一直顯示「表單已過期，請重新整理頁面」 | 瀏覽器沒有帶回 cvehub 的 cookie。最常見：用同一個主機名稱／IP 連的另一個網站（例如另一個 port 上的另一套 cvehub）有同名 cookie——瀏覽器的 cookie 不分 port，會互相蓋掉；對方是 HTTPS 時，它的 cookie 還會擋住這邊的。0.9.1 起 `.env` 的 `WEB_HOST_PORT` 不是 8080 時，cookie 名稱自動帶上 port；用 `docker-compose.override.yml` 改 port 的，請在 `.env` 設 `WEB_COOKIE_NAME`（例 `cvehub_session_b`）。改完要重新登入；暫時的做法是用無痕視窗。另外確認用 HTTP 連線時 `WEB_COOKIE_SECURE` 是 `false` |
+| 登入一直顯示「表單已過期，請重新整理頁面」 | 0.9.2 已修正最常見的原因（瀏覽器自己要的 `/favicon.ico` 換掉了登入頁的 token），請先更新。仍出現時看原因：`cd /opt/cvehub && sudo docker compose logs | grep CSRF`——「沒有送出 cookie」＝瀏覽器沒存或不送（HTTP 連線卻設 `WEB_COOKIE_SECURE=true`／`WEB_TLS_CERT`、瀏覽器政策封鎖 cookie、同主機名稱的其他網站有同名 cookie：用 `.env` 的 `WEB_COOKIE_NAME` 換名稱）；「cookie 無法使用」＝重新安裝換了金鑰，重新整理登入頁即可；「不一致」＝頁面是舊的（中間的代理快取），重新整理再登入 |
 | 主機清單匯入失敗 | 「資料匯入」頁列出錯誤與列號；常見：缺 `release`、版本不在安裝時填的清單、同一台主機的 `release` 前後不一致 |
 | OSV 匯入「某版本的資料筆數不足」 | 先確認 `UBUNTU_RELEASES` 沒設錯；沒錯的話可能是 Canonical 改了版本名稱（`cvehub/osv_import.py` 的 `wanted_ecosystems()`） |
 | VEX「無法辨識」不是 0 | Canonical 改了說明文字；在 `cvehub/vex_import.py` 的 `classify()` 加對應，跑測試後重新匯入 |

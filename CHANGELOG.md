@@ -2,6 +2,14 @@
 
 更新方式見 README「6. 更新、回復、備份」：解開新版 zip，`sudo bash <解開的目錄>/install.sh`。
 
+## 0.9.2
+- **修正：用一般瀏覽器登入時一直顯示「表單已過期」（400）**。瀏覽器開登入頁後會自己去要 `/favicon.ico`（開著 F12 時 Chrome 還會要 `/.well-known/…`）；舊版把這些未登入的請求當成「需要登入」，清掉 session 再轉到登入頁，登入頁正在用的 CSRF token 就被換掉了。0.6.0 起就有這個問題（之前的測試用 headless 瀏覽器與 curl，不會發這些請求）
+  - 不存在的網址直接回 404，不碰 session、不轉到登入頁；頁面宣告空的圖示，瀏覽器不再要 `/favicon.ico`
+  - 從沒登入過的 session 不再被清掉（未登入的請求不送 Set-Cookie）；登入失效時才整個清掉、之後換新的 token
+  - 所有頁面加上 `Cache-Control: no-store`（代理或瀏覽器快取的舊登入頁也會造成同樣的錯誤；頁面也含主機與弱點資料）
+  - 登入時 token 不對：重新顯示登入頁並換上可用的 token（不驗證密碼），再輸入一次就能登入；HTTP 連線卻設定 Secure cookie 時直接說明要改的設定
+  - token 不對的原因寫進容器 log（`docker compose logs | grep CSRF`）：沒收到 cookie／cookie 無法使用／表單與 cookie 不一致（只記容器 log，不寫稽核紀錄：不需要帳號就能觸發）
+
 ## 0.9.1
 - 網頁的主機 port 改成 `.env` 的 `WEB_HOST_PORT`（安裝時會問、會檢查是否被佔用；可寫 `127.0.0.1:8080`），不用再改 `docker-compose.yml`
 - 更新時，舊版 `docker-compose.yml` 手動改過的 port（含指定 IP、長格式）會自動寫進 `.env` 的 `WEB_HOST_PORT`，不會變回 8080；`.env` 已經有 `WEB_HOST_PORT` 時以它為準；ports 有多筆、看不懂時，更新前就停下來請你先設定（不會做任何變更）

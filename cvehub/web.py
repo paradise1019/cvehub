@@ -10,6 +10,7 @@ import time
 import urllib.parse
 
 from flask import Flask, Response, abort, g, jsonify, redirect, render_template, request, session, url_for
+from werkzeug.exceptions import NotFound
 
 from . import __version__, auth, db, impact, osv_import, period, report, sync, vex_import
 from .lock import Busy, job_lock
@@ -117,8 +118,12 @@ def create_app(start_scheduler=True):
 
     @app.before_request
     def authenticate():
-        g.con = db.connect()
         g.user, g.role = None, None
+        if isinstance(request.routing_exception, NotFound):
+            # 不存在的網址（瀏覽器自己要的 /favicon.ico、/.well-known/…、robots.txt）：直接 404，
+            # 不碰 session、不轉到登入頁——否則會換掉登入頁的 CSRF token，登入一直「表單已過期」
+            return None
+        g.con = db.connect()
         ep = request.endpoint or ""
         if ep in ("healthz", "static"):          # 監控用，不需登入，只回健康狀態
             return None
@@ -129,25 +134,58 @@ def create_app(start_scheduler=True):
                 return Response("需要登入", 401, {"WWW-Authenticate": 'Basic realm="cvehub-api"'})
             g.user, g.role = u["username"], u["role"]
             return None
-        def check_csrf():
-            # 防 CSRF：POST 必須來自同一個網站，並帶 session 裡的 token（這裡才會讀表單內容）
+        def csrf_problem():
+            """防 CSRF：POST 必須來自同一個網站，並帶 session 裡的 token（這裡才會讀表單內容）。
+            沒問題回傳 None；token 不對時回傳 (代碼, 說明)，說明也記在 log（方便查「表單已過期」）
+            代碼：no-cookie-https（HTTP 連線卻設定 Secure cookie）、no-cookie、bad-cookie、no-token、mismatch"""
             src = request.headers.get("Origin") or request.headers.get("Referer") or ""
             if urllib.parse.urlparse(src).netloc != request.host:
                 abort(403)
-            if not hmac.compare_digest(str(request.form.get("csrf", "")), str(session.get("csrf", "-"))):
-                abort(Response("表單已過期，請重新整理頁面再試一次", 400))
+            sent, have = str(request.form.get("csrf", "")), session.get("csrf")
+            if have and hmac.compare_digest(sent, str(have)):
+                return None
+            name = app.config["SESSION_COOKIE_NAME"]
+            if name not in request.cookies:
+                if app.config["SESSION_COOKIE_SECURE"] and not request.is_secure \
+                        and request.headers.get("X-Forwarded-Proto", "").lower() != "https":
+                    code, why = "no-cookie-https", ("瀏覽器沒有送出 cookie %s：設定要求 cookie 只走 HTTPS"
+                                                     "（WEB_COOKIE_SECURE／WEB_TLS_CERT），但目前是 HTTP 連線" % name)
+                else:
+                    code, why = "no-cookie", "瀏覽器沒有送出 cookie %s（登入逾時被清掉，或瀏覽器沒有存／不送 cookie）" % name
+            elif not have:
+                code, why = "bad-cookie", "cookie %s 無法使用（簽章不符或已過期，例如重新安裝換了金鑰）" % name
+            elif not sent:
+                code, why = "no-token", "表單沒有 token"
+            else:
+                code, why = "mismatch", "表單的 token 和 cookie 不一致（頁面是舊的，或 session 被換掉了）"
+            log.warning("CSRF 檢查失敗：%s %s 來自 %s：%s", request.method, request.path, _ip(), why)
+            return code, why
+
+        def current_user():
+            """session 對應的有效帳號；沒登入，或已失效（閒置、改密碼、停用、帳號不存在）時回傳 None"""
+            if "uid" not in session:
+                return None
+            u = auth.get_user(g.con, session.get("uid", 0))
+            idle = time.time() - session.get("seen", 0) > Config.WEB_SESSION_IDLE_MINUTES * 60
+            if not u or not u["active"] or u["session_ver"] != session.get("ver") or idle:
+                return None
+            return u
 
         if ep == "login":
+            if request.method == "GET" and "uid" in session and not current_user():
+                session.clear()                      # 登入頁一律拿新的 token，不沿用失效登入的 token
             if request.method == "POST":
                 # 登入表單很小：這個請求最多讀 LOGIN_MAX_BODY（有 Content-Length 超過就 413；chunked 讀到上限就停）
                 request.max_content_length = LOGIN_MAX_BODY
-                check_csrf()
+                g.csrf_problem = csrf_problem()      # 登入頁自己處理：重新顯示表單（換上可用的 token），不驗證密碼
             return None
         # 先確認已登入、有權限，才讀 POST 的內容（未登入的上傳不會被解析或寫到磁碟）
-        u = auth.get_user(g.con, session.get("uid", 0)) if session.get("uid") else None
-        idle = time.time() - session.get("seen", 0) > Config.WEB_SESSION_IDLE_MINUTES * 60
-        if not u or not u["active"] or u["session_ver"] != session.get("ver") or idle:
-            session.clear()
+        u = current_user()
+        if not u:
+            # 原本登入、現在失效（閒置、改密碼、停用）：整個清掉，之後換新的 token。
+            # 從沒登入過的 session 不動：未登入的請求不能換掉登入頁正在用的 token
+            if "uid" in session:
+                session.clear()
             if request.method == "GET":
                 return redirect(url_for("login", next=request.full_path if request.query_string else request.path))
             abort(401)
@@ -155,8 +193,17 @@ def create_app(start_scheduler=True):
         if g.role != "admin" and (request.method == "POST" and ep not in ("logout", "account") or ep == "users"):
             abort(Response("需要管理權限", 403))
         if request.method == "POST":
-            check_csrf()
+            bad = csrf_problem()
+            if bad:
+                abort(Response("表單已過期，請重新整理頁面再試一次（%s）" % bad[1], 400))
         session["seen"] = int(time.time())
+
+    @app.after_request
+    def no_store(resp):
+        # 頁面含 CSRF token 與主機、弱點資料：瀏覽器與中間的代理都不要快取（快取的舊登入頁也會造成「表單已過期」）
+        if request.endpoint != "static":
+            resp.headers.setdefault("Cache-Control", "no-store")
+        return resp
 
     def _ip():
         return request.remote_addr or ""
@@ -188,6 +235,18 @@ def create_app(start_scheduler=True):
     @app.route("/login", methods=["GET", "POST"])
     def login():
         err = ""
+        if request.method == "POST" and g.get("csrf_problem"):
+            # token 不對（頁面是舊的、cookie 被換掉…）：不驗證密碼，重新顯示表單並換上可用的 token，再送一次就能登入
+            # （原因只記在容器 log，不寫稽核紀錄：不需要帳號就能觸發，避免灌爆稽核紀錄）
+            code = g.csrf_problem[0]
+            if code == "no-cookie-https":          # 再試也沒用：要改連線方式或設定
+                err = ("瀏覽器沒有送回登入用的 cookie：目前是 HTTP 連線，但設定要求 cookie 只走 HTTPS。"
+                       "請改用 https:// 連線，或請管理員把 .env 的 WEB_COOKIE_SECURE 設成 false")
+            elif code == "no-cookie":
+                err = "登入頁已過期，已重新載入，請再輸入一次密碼（一直出現這個訊息時，請確認瀏覽器允許這個網站的 cookie）"
+            else:
+                err = "登入頁已過期，已重新載入，請再輸入一次密碼"
+            return render_template("login.html", err=err, next=request.form.get("next", "")), 400
         if request.method == "POST":
             name = request.form.get("username", "")
             why = []
