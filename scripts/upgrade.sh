@@ -139,7 +139,7 @@ print(h.hexdigest(), end="")
 PY
 
 code_fp() {
-    (cd "$1" && docker compose config --format json 2>/dev/null || true) | python3 -c "$FP_PY" "$1"
+    (cd "$1" || exit 0; docker compose config --format json 2>/dev/null || true) | python3 -c "$FP_PY" "$1"
 }
 
 image_fp() { docker image inspect --format '{{index .Config.Labels "org.cvehub.code-fp"}}' "$1" 2>/dev/null || true; }
