@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # cvehub 安裝／更新（一支腳本處理兩種情況）
 #
-#   1. 解開 zip：python3 -m zipfile -e cvehub-<版本>.zip /tmp/cvehub-src
+#   1. 解開 zip（GitHub 下載的 cvehub-main.zip）：python3 -m zipfile -e /tmp/cvehub-main.zip /tmp/cvehub-src
 #   2. 執行：    sudo bash /tmp/cvehub-src/*/install.sh
 #
 #   安裝目錄預設 /opt/cvehub（CVEHUB_DIR=/其他/路徑 可改）

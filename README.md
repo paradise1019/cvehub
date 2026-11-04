@@ -41,9 +41,9 @@ sudo docker load -i python-3.12-slim.tar.gz
 內部 registry 有這個 image 時，也可以 load 那一份，安裝時「基礎 image」填它的完整名稱。
 
 ### 步驟 2：執行 install.sh
-把程式 zip 放到主機（例如 `/tmp/cvehub.zip`）：
+把程式 zip（GitHub「Code → Download ZIP」下載的 `cvehub-main.zip`）放到主機的 `/tmp`：
 ```bash
-python3 -m zipfile -e /tmp/cvehub.zip /tmp/cvehub-src
+rm -rf /tmp/cvehub-src && python3 -m zipfile -e /tmp/cvehub-main.zip /tmp/cvehub-src
 sudo bash /tmp/cvehub-src/*/install.sh
 ```
 腳本會問幾個問題（直接按 Enter 用預設值）：
@@ -70,9 +70,9 @@ sudo bash /tmp/cvehub-src/*/install.sh
 ### 完全離線（沒有 Python 套件來源、也不能 docker pull）
 主機只能用傳檔案的方式時，用離線安裝包：程式、Python 套件、基礎 image 都在一個檔案裡，安裝與更新都不連網路。
 
-在能上網（或連得到 Nexus）、有 Docker 的機器，解開程式 zip 後產生安裝包：
+在能上網（或連得到 Nexus）、有 Docker 的機器，把 `cvehub-main.zip` 放到 `/tmp`，解開後產生安裝包：
 ```bash
-python3 -m zipfile -e cvehub.zip /tmp/cvehub-src
+rm -rf /tmp/cvehub-src && python3 -m zipfile -e /tmp/cvehub-main.zip /tmp/cvehub-src
 sudo bash /tmp/cvehub-src/*/scripts/make-offline.sh /tmp/out
 ```
 ✅ 產生 `/tmp/out/cvehub-<版本>-offline.tar.gz`（約 50 MB）。要從 Nexus 下載套件時加 `PIP_INDEX_URL=…`；基礎 image 不是 `python:3.12-slim` 時加 `BASE_IMAGE=…`。
@@ -179,9 +179,9 @@ dpkg-query -W -f='${db:Status-Abbrev}\t${binary:Package}\t${Version}\n' \
 ## 6. 更新、回復、備份
 
 ### 6.1 更新
-新版 zip 一樣用 install.sh，它發現已經安裝過就自動改成更新：
+新版 zip 一樣用 install.sh，它發現已經安裝過就自動改成更新（新版的 `cvehub-main.zip` 放到 `/tmp`；先刪掉上次解開的目錄，避免混到舊檔）：
 ```bash
-python3 -m zipfile -e /tmp/cvehub-new.zip /tmp/cvehub-new
+rm -rf /tmp/cvehub-new && python3 -m zipfile -e /tmp/cvehub-main.zip /tmp/cvehub-new
 sudo bash /tmp/cvehub-new/*/install.sh
 ```
 流程：顯示版本與更新說明 → 備份程式與設定 → 換程式 → 建 image、跑測試（**失敗自動還原，舊版照常運作**）→ 停機約 1 分鐘、備份資料庫 → 啟動新版 → 健康檢查。
