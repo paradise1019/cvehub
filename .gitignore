@@ -10,3 +10,8 @@ config/
 *.sqlite3
 *.tar.xz
 .install-incomplete
+
+# 離線安裝包（scripts/make-offline.sh）
+wheels/*.whl
+*-offline/
+*-offline.tar.gz

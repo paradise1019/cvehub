@@ -28,4 +28,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: 檢查安裝與更新腳本
-        run: shellcheck install.sh scripts/upgrade.sh
+        run: shellcheck install.sh scripts/upgrade.sh scripts/make-offline.sh scripts/bundle-base.sh

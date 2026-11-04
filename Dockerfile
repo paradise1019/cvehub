@@ -1,17 +1,25 @@
 # cvehub：Landscape × Canonical OSV 的 CVE 管理服務
 # 內網：.env 設 BASE_IMAGE（事先 docker load 進來的基礎 image）、PIP_INDEX_URL（Nexus）
 # 主機不能 docker pull 時：基礎 image 必須已在本機，建置不會去 registry 抓
+# 完全離線（離線安裝包，scripts/make-offline.sh 產生）：wheels/ 裡有套件時只從那裡安裝，不連任何套件來源
 ARG BASE_IMAGE=python:3.12-slim
 FROM ${BASE_IMAGE}
 
 ARG PIP_INDEX_URL=https://pypi.org/simple
 ARG PIP_TRUSTED_HOST=
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_ROOT_USER_ACTION=ignore
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir --disable-pip-version-check --index-url "${PIP_INDEX_URL}" \
-        ${PIP_TRUSTED_HOST:+--trusted-host "$PIP_TRUSTED_HOST"} -r requirements.txt
+COPY wheels ./wheels
+# 有離線套件時只用它們（裝不起來就建置失敗，不會改連網路；通常是 BASE_IMAGE 和產生安裝包時的不同）
+RUN if ls wheels/*.whl >/dev/null 2>&1; then \
+        pip install --no-cache-dir --disable-pip-version-check --no-index --find-links wheels -r requirements.txt \
+            || { echo "wheels/ 的套件裝不起來：和基礎 image 的 Python 版本或架構不合？請用同一個 BASE_IMAGE 重新產生離線安裝包" >&2; exit 1; }; \
+    else \
+        pip install --no-cache-dir --disable-pip-version-check --index-url "${PIP_INDEX_URL}" \
+            ${PIP_TRUSTED_HOST:+--trusted-host "$PIP_TRUSTED_HOST"} -r requirements.txt; \
+    fi && rm -rf wheels
 
 COPY cvehub ./cvehub
 COPY tests ./tests

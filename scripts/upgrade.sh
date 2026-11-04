@@ -13,7 +13,7 @@
 #       → 停容器 → 備份資料庫 → 啟動新版 → 健康檢查
 set -Eeuo pipefail
 
-CODE_ITEMS=(cvehub tests scripts ansible django-kernel-view mock-kernel-api Dockerfile docker-compose.yml requirements.txt
+CODE_ITEMS=(cvehub tests scripts ansible django-kernel-view mock-kernel-api wheels Dockerfile docker-compose.yml requirements.txt
             install.sh README.md MAINTENANCE.md CHANGELOG.md .env.example .dockerignore .gitignore)
 
 rollback_hint() {   # 回復指令：用備份目錄裡的腳本副本（就是建立這份備份的腳本，安裝目錄的 scripts/ 可能是別的版本或不完整）
@@ -109,7 +109,7 @@ d = json.load(sys.stdin)
 print(((d["services"]["cvehub"].get("build") or {}).get("args") or {}).get("BASE_IMAGE", ""), end="")'
 }
 
-# 程式指紋：cvehub/（不含 __pycache__）＋requirements.txt＋Dockerfile＋基礎 image 與 Dockerfile 設定
+# 程式指紋：cvehub/（不含 __pycache__）＋requirements.txt＋Dockerfile＋離線套件（wheels/*.whl 的檔名）＋基礎 image 與 Dockerfile 設定
 # （proxy、Nexus 位址這類不影響 image 內容的設定不算）。compose 的設定含 .env 的秘密：只經 stdin 傳給 python，不放命令列
 read -r -d '' FP_PY <<'PY' || true
 import hashlib, json, os, sys
@@ -128,6 +128,11 @@ for dirpath, dirnames, filenames in os.walk(os.path.join(root, "cvehub")):
 for name in ("requirements.txt", "Dockerfile"):
     if os.path.exists(os.path.join(root, name)):
         add(os.path.join(root, name))
+# 離線安裝包的套件（檔名含版本）；沒有時不加，和 0.9.5 以前的指紋相同（回復舊版時沿用保留的 image）
+wheels = os.path.join(root, "wheels")
+if os.path.isdir(wheels):
+    for name in sorted(n for n in os.listdir(wheels) if n.endswith(".whl")):
+        h.update(b"wheel\0" + name.encode() + b"\0")
 try:
     build = json.load(sys.stdin)["services"]["cvehub"].get("build") or {}
     keep = {"base_image": (build.get("args") or {}).get("BASE_IMAGE", ""),
@@ -431,6 +436,7 @@ upgrade() {
             cp -a "$src/$it" "$APP_DIR/$it"
         fi
     done
+    mkdir -p "$APP_DIR/wheels"          # Dockerfile 一定會 COPY 它（沒有離線套件時是空的）
 
     local missing
     missing="$(comm -23 <(grep -oE '^[A-Z_][A-Z0-9_]*=' "$APP_DIR/.env.example" 2>/dev/null | sort -u || true) \
@@ -443,8 +449,16 @@ upgrade() {
     local base
     base="$(base_image)" || abort_code "無法解析新版的 docker compose 設定（訊息如上）"
     base="${base:-python:3.12-slim}"
+    if [[ -n "${CVEHUB_BUNDLE_DIR:-}" && -f "$APP_DIR/scripts/bundle-base.sh" ]]; then     # 離線安裝包（install.sh 傳來）
+        local brc=0
+        bash "$APP_DIR/scripts/bundle-base.sh" "$CVEHUB_BUNDLE_DIR" "$base" || brc=$?
+        # 1＝名稱不同：本機已經有要用的 image 就照常更新，沒有才停下（原因如上）；2＝安裝包有問題
+        if [[ $brc == 2 ]] || { [[ $brc == 1 ]] && ! docker image inspect "$base" >/dev/null 2>&1; }; then
+            abort_code "離線安裝包的基礎 image 不能用（原因如上）"
+        fi
+    fi
     if ! docker image inspect "$base" >/dev/null 2>&1; then
-        info "本機沒有基礎 image「$base」，嘗試 docker pull（主機不能連外時會失敗，請改用 docker load）"
+        info "本機沒有基礎 image「$base」，嘗試 docker pull（主機不能連外時會失敗，請改用 docker load 或離線安裝包）"
         docker pull "$base" >/dev/null 2>&1 \
             || abort_code "拿不到基礎 image「$base」（.env 的 BASE_IMAGE）。請先載入：sudo docker load -i <檔案>（做法見 README 步驟 3）"
     fi

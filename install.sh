@@ -12,10 +12,12 @@
 #
 # 主機不需要能 docker pull：基礎 image（預設 python:3.12-slim）要先 docker load 進來，
 # Python 套件從 PIP_INDEX_URL（例如內部 Nexus）安裝。
+# 完全離線（沒有套件來源、也拉不到 image）：用離線安裝包（scripts/make-offline.sh 產生），解開後一樣執行這支：
+#   基礎 image 從包裡的 base-image.tar.gz 自動 docker load，Python 套件從程式目錄的 wheels/ 安裝，不連任何網路
 set -Eeuo pipefail
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
-APP_DIR="${CVEHUB_DIR:-/opt/cvehub}"
+APP_DIR="$(realpath -m -s -- "${CVEHUB_DIR:-/opt/cvehub}")"     # 絕對路徑（相對路徑會依目前目錄而不同）
 YES=0
 [[ "${1:-}" == "-y" ]] && YES=1
 
@@ -126,6 +128,19 @@ command -v docker >/dev/null || die "需要 Docker：sudo apt install docker.io 
 docker compose version >/dev/null 2>&1 || die "需要 Docker Compose v2：sudo apt install docker-compose-v2"
 VERSION="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$SRC/cvehub/__init__.py")"
 
+# 離線安裝包：程式目錄的 wheels/ 有套件；基礎 image 放在程式目錄的上一層（base-image.tar.gz＋base-image.txt 寫 image 名稱）
+OFFLINE=0
+compgen -G "$SRC/wheels/*.whl" >/dev/null && OFFLINE=1
+BUNDLE_DIR="$(dirname "$SRC")"
+BUNDLE_BASE=""
+[[ -f "$BUNDLE_DIR/base-image.tar.gz" && -f "$BUNDLE_DIR/base-image.txt" ]] && BUNDLE_BASE="$(head -n 1 "$BUNDLE_DIR/base-image.txt")"
+
+# 失敗後要重新執行的指令：離線安裝包要從包裡的 install.sh 執行（安裝目錄裡的找不到包裡的基礎 image）
+# 用 CVEHUB_DIR 裝到別的目錄時要帶著它，否則會變成在 /opt/cvehub 重新安裝
+q_app="$(printf '%q' "$APP_DIR")"
+RERUN="sudo ${CVEHUB_DIR:+CVEHUB_DIR=$q_app }bash $q_app/install.sh"
+[[ -n "$BUNDLE_BASE" ]] && RERUN="sudo ${CVEHUB_DIR:+CVEHUB_DIR=$q_app }bash $(printf '%q' "$SRC")/install.sh"
+
 # 安裝狀態：.install-incomplete＝install.sh 寫好 .env 但還沒成功啟動過（成功後刪除）
 # 有 .env 與程式、沒有這個標記＝已安裝（包含 0.8.x 以前手動安裝的）→ 更新
 INCOMPLETE="$APP_DIR/.install-incomplete"
@@ -133,6 +148,7 @@ INCOMPLETE="$APP_DIR/.install-incomplete"
 # ---------------------------------------------------------------- 已安裝 → 更新
 if [[ -f "$APP_DIR/.env" && -f "$APP_DIR/cvehub/__init__.py" && ! -e "$INCOMPLETE" ]]; then
     say "$APP_DIR 已經安裝 cvehub，改用更新流程（→ $VERSION）"
+    [[ -n "$BUNDLE_BASE" ]] && export CVEHUB_BUNDLE_DIR="$BUNDLE_DIR"     # 離線安裝包：更新腳本從這裡載入基礎 image
     tmp="$(mktemp -d)"
     trap 'rm -rf -- "$tmp"' EXIT
     # 只打包程式（不含 .env、data、backups、config）
@@ -168,7 +184,7 @@ if [[ -f "$APP_DIR/.env" && -e "$INCOMPLETE" ]]; then
     PIP_INDEX_URL="$(get_env PIP_INDEX_URL)"
     HOST_SOURCE="$(get_env HOST_SOURCE)"
     WEB_HOST_PORT="$(get_env WEB_HOST_PORT)"; WEB_HOST_PORT="${WEB_HOST_PORT:-8080}"
-    [[ "$WEB_HOST_PORT" == \[* ]] || valid_port "$WEB_HOST_PORT" || die ".env 的 WEB_HOST_PORT 不正確：$WEB_HOST_PORT（例：8081、127.0.0.1:8081）；修正後重新執行：sudo bash $APP_DIR/install.sh"
+    [[ "$WEB_HOST_PORT" == \[* ]] || valid_port "$WEB_HOST_PORT" || die ".env 的 WEB_HOST_PORT 不正確：$WEB_HOST_PORT（例：8081、127.0.0.1:8081）；修正後重新執行：$RERUN"
     mkdir -p config data
     chown -R 10001 data
 else
@@ -200,9 +216,18 @@ else
         [[ $YES == 1 ]] && die "請用環境變數指定沒被使用的 port，例：sudo WEB_HOST_PORT=<port> bash $0 -y"
         WEB_HOST_PORT=""
     done
-    ask BASE_IMAGE       "基礎 image（要先 docker load 進來）" "python:3.12-slim"
-    ask PIP_INDEX_URL    "Python 套件來源（內部 Nexus 的 PyPI proxy，或 pypi.org）" "https://pypi.org/simple"
-    ask PIP_TRUSTED_HOST "套件來源是自簽憑證時填它的主機名稱（否則留空）" ""
+    if [[ -n "$BUNDLE_BASE" ]]; then
+        ask BASE_IMAGE   "基礎 image（離線安裝包裡附的）" "$BUNDLE_BASE"
+    else
+        ask BASE_IMAGE   "基礎 image（要先 docker load 進來）" "python:3.12-slim"
+    fi
+    if [[ $OFFLINE == 1 ]]; then
+        say "   Python 套件：用離線安裝包裡的（wheels/），不需要套件來源"
+        PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.org/simple}"; PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST:-}"
+    else
+        ask PIP_INDEX_URL    "Python 套件來源（內部 Nexus 的 PyPI proxy，或 pypi.org）" "https://pypi.org/simple"
+        ask PIP_TRUSTED_HOST "套件來源是自簽憑證時填它的主機名稱（否則留空）" ""
+    fi
     if [[ "$HOST_SOURCE" == landscape ]]; then
         ask LANDSCAPE_API_URI    "Landscape API 網址" "https://landscape.example.com/api/"
         ask LANDSCAPE_API_KEY    "Landscape API key" ""
@@ -242,16 +267,32 @@ else
 fi
 
 step "3/7 檢查基礎 image：$BASE_IMAGE"
-if ! docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
+rc=1
+if [[ -n "$BUNDLE_BASE" ]]; then
+    bash "$SRC/scripts/bundle-base.sh" "$BUNDLE_DIR" "$BASE_IMAGE" || rc=$?
+    [[ $rc == 0 || $rc == 1 ]] || die "離線安裝包的基礎 image 不能用（原因如上）；處理後重新執行：$RERUN"
+fi
+if [[ $rc != 0 ]] && ! docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
     say "   本機沒有，試著 docker pull…"
-    docker pull "$BASE_IMAGE" >/dev/null 2>&1 || die "拿不到 $BASE_IMAGE。在能上網的機器執行
+    if [[ -n "$BUNDLE_BASE" ]]; then
+        docker pull "$BASE_IMAGE" >/dev/null 2>&1 || die "拿不到 $BASE_IMAGE：離線安裝包附的是 $BUNDLE_BASE，請把 $APP_DIR/.env 的 BASE_IMAGE 改成它，再執行：$RERUN"
+    else
+        docker pull "$BASE_IMAGE" >/dev/null 2>&1 || die "拿不到 $BASE_IMAGE。在能上網的機器執行
      docker pull $BASE_IMAGE && docker save $BASE_IMAGE | gzip > base-image.tar.gz
-   帶進來後：sudo docker load -i base-image.tar.gz，再重新執行：sudo bash $APP_DIR/install.sh"
+   帶進來後：sudo docker load -i base-image.tar.gz，再重新執行：$RERUN
+   （完全離線的主機請改用離線安裝包，見 README「完全離線」）"
+    fi
 fi
 
-step "4/7 建立 image（Python 套件來自 $PIP_INDEX_URL）"
-docker compose build -q || die "建置失敗：檢查 .env 的 PIP_INDEX_URL、PIP_TRUSTED_HOST（套件來源連得到、有 requirements.txt 裡的版本）
-   修正後重新執行：sudo bash $APP_DIR/install.sh"
+if [[ $OFFLINE == 1 ]]; then
+    step "4/7 建立 image（Python 套件來自離線安裝包，不連網路）"
+    docker compose build -q || die "建置失敗（訊息如上）。離線安裝包的套件和基礎 image 不合時（例如 .env 的 BASE_IMAGE 換過），
+   請在能上網的地方用同一個 BASE_IMAGE 重新執行 scripts/make-offline.sh；處理後重新執行：$RERUN"
+else
+    step "4/7 建立 image（Python 套件來自 $PIP_INDEX_URL）"
+    docker compose build -q || die "建置失敗：檢查 .env 的 PIP_INDEX_URL、PIP_TRUSTED_HOST（套件來源連得到、有 requirements.txt 裡的版本）
+   修正後重新執行：$RERUN"
+fi
 
 step "5/7 自動化測試"
 docker compose run --rm --no-deps -T cvehub python -m unittest discover -s tests -t . </dev/null >/tmp/cvehub-test.log 2>&1 \
@@ -260,7 +301,7 @@ say "   $(grep -E '^Ran ' /tmp/cvehub-test.log)，全部通過"
 
 step "6/7 建立管理員帳號"
 users="$(docker compose run --rm --no-deps -T cvehub python -c "from cvehub import db; c = db.connect(); db.init(c); print(c.execute('SELECT COUNT(*) FROM users').fetchone()[0])" </dev/null 2>/tmp/cvehub-db.log | tail -1 || true)"
-[[ "$users" =~ ^[0-9]+$ ]] || die "無法讀取資料庫（訊息在 /tmp/cvehub-db.log）；修正後重新執行：sudo bash $APP_DIR/install.sh"
+[[ "$users" =~ ^[0-9]+$ ]] || die "無法讀取資料庫（訊息在 /tmp/cvehub-db.log）；修正後重新執行：$RERUN"
 if [[ "$users" -gt 0 ]]; then
     say "   已有 $users 個帳號，略過"
 elif [[ $YES == 1 ]]; then
@@ -274,9 +315,9 @@ fi
 
 step "7/7 啟動（port $WEB_HOST_PORT）"
 if [[ -z "$(docker compose ps -q cvehub 2>/dev/null)" ]] && port_busy "$WEB_HOST_PORT"; then
-    die "port ${WEB_HOST_PORT##*:} 已經被其他程式使用；改 $APP_DIR/.env 的 WEB_HOST_PORT（例：WEB_HOST_PORT=8081）後重新執行：sudo bash $APP_DIR/install.sh"
+    die "port ${WEB_HOST_PORT##*:} 已經被其他程式使用；改 $APP_DIR/.env 的 WEB_HOST_PORT（例：WEB_HOST_PORT=8081）後重新執行：$RERUN"
 fi
-docker compose up -d || die "啟動失敗（訊息如上）。port 的問題（被佔用、IP 不對）請改 $APP_DIR/.env 的 WEB_HOST_PORT 後重新執行：sudo bash $APP_DIR/install.sh"
+docker compose up -d || die "啟動失敗（訊息如上）。port 的問題（被佔用、IP 不對）請改 $APP_DIR/.env 的 WEB_HOST_PORT 後重新執行：$RERUN"
 for _ in $(seq 1 60); do
     st="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose ps -q cvehub)" 2>/dev/null || true)"
     [[ "$st" == healthy ]] && break

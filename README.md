@@ -21,7 +21,7 @@ OSV＋VEX（Canonical 漏洞資料）─┘
 | 記憶體／磁碟 | 1 GB 以上／2 GB 以上（四個 Ubuntu 版本的資料庫約 250 MB） |
 | 基礎 image | `python:3.12-slim`：主機能 `docker pull` 就自動抓；不能的話先 `docker load`（步驟 1） |
 | Python 套件 | 建置時從 PyPI 或內部 Nexus 安裝（Flask、gunicorn、APScheduler、openpyxl，共約 12 MB） |
-| 帶進去的檔案 | 程式 zip 約 120 KB；不能 pull 時另加基礎 image 約 45 MB |
+| 帶進去的檔案 | 程式 zip 約 120 KB；不能 pull 時另加基礎 image 約 45 MB；完全離線時改帶離線安裝包約 50 MB（見「完全離線」） |
 
 建好的 image 約 190 MB（基礎 image 占大部分）。
 
@@ -66,6 +66,28 @@ sudo bash /tmp/cvehub-src/*/install.sh
 - 不詢問、全用預設值：加 `-y`（管理員之後再建，指令會印出來）；要指定值時用環境變數，例 `sudo WEB_HOST_PORT=8081 bash …/install.sh -y`（只在全新安裝時有效）
 - 之後要換 port：改 `.env` 的 `WEB_HOST_PORT`，`cd /opt/cvehub && sudo docker compose up -d`（不要改 `docker-compose.yml`，更新時會被換掉）
 - ❌ 拿不到基礎 image：回到步驟 1。❌ 建置失敗：檢查 Nexus 網址、自簽憑證主機名稱（`sudo nano /opt/cvehub/.env`），修正後重新執行 `sudo bash /opt/cvehub/install.sh`（會沿用 `.env` 接著做，不會再問）。
+
+### 完全離線（沒有 Python 套件來源、也不能 docker pull）
+主機只能用傳檔案的方式時，用離線安裝包：程式、Python 套件、基礎 image 都在一個檔案裡，安裝與更新都不連網路。
+
+在能上網（或連得到 Nexus）、有 Docker 的機器，解開程式 zip 後產生安裝包：
+```bash
+python3 -m zipfile -e cvehub.zip /tmp/cvehub-src
+sudo bash /tmp/cvehub-src/*/scripts/make-offline.sh /tmp/out
+```
+✅ 產生 `/tmp/out/cvehub-<版本>-offline.tar.gz`（約 50 MB）。要從 Nexus 下載套件時加 `PIP_INDEX_URL=…`；基礎 image 不是 `python:3.12-slim` 時加 `BASE_IMAGE=…`。
+
+把這個檔案傳到主機後，解開到自己的目錄（安裝包目錄的擁有者要是自己或 root、別人不能寫入，否則 install.sh 不會從那裡載入 image）：
+```bash
+mkdir -p ~/cvehub-install && tar -xzf cvehub-<版本>-offline.tar.gz -C ~/cvehub-install
+(cd ~/cvehub-install/cvehub-<版本>-offline && sha256sum -c --quiet SHA256SUMS)       # 沒有輸出＝檔案完整
+sudo bash ~/cvehub-install/cvehub-<版本>-offline/cvehub-<版本>/install.sh
+```
+基礎 image 會自動 `docker load`（先檢查 SHA256SUMS、架構、image 名稱），不會問套件來源，其他問題和步驟 2 相同。
+更新也一樣：新版的離線安裝包解開後執行裡面的 install.sh（6.1）。安裝或更新中途失敗時，也是重新執行安裝包裡的 install.sh。
+- `.env` 的 `BASE_IMAGE` 要和安裝包裡的相同（`base-image.txt`），不同時不會自動載入
+- 安裝包要在和主機相同架構（一般是 x86_64／amd64）的機器上產生
+- 換基礎 image（例如每季的 Python 安全更新）：重新產生安裝包（會先 `docker pull` 最新的），再跑一次 install.sh；安裝包裡的 image 一律重新載入
 
 ## 3. 開始使用
 
@@ -164,6 +186,7 @@ sudo bash /tmp/cvehub-new/*/install.sh
 ```
 流程：顯示版本與更新說明 → 備份程式與設定 → 換程式 → 建 image、跑測試（**失敗自動還原，舊版照常運作**）→ 停機約 1 分鐘、備份資料庫 → 啟動新版 → 健康檢查。
 `.env`、`data/`、`config/` 不會動；新版多出的設定會列出來，沒補就用預設值。
+完全離線的主機：解開新版的離線安裝包，執行裡面的 install.sh（見「2. 安裝」的「完全離線」），不必另外準備基礎 image 與套件。
 同一個版本重跑也可以（例如換了新的基礎 image 要重建）。過程記在 `/opt/cvehub/backups/upgrade.log`。
 
 ### 6.2 回復
