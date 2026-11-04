@@ -30,6 +30,7 @@ class TempEnv:
                 "KERNEL_API_URL": "", "KERNEL_API_MODE": "bulk", "HISTORY_KEEP_DAYS": 365,
                 # 在已部署的容器裡跑測試時，Config 會讀到真實的 .env：外部連線一律清空，避免測試連到 Landscape／kernel API
                 "LANDSCAPE_API_URI": "", "LANDSCAPE_API_KEY": "", "LANDSCAPE_API_SECRET": "", "KERNEL_API_TOKEN": "",
+                "LANDSCAPE_QUERY": "", "HOST_MATCH_KEY": "shortname", "HOST_MATCH_CASE_INSENSITIVE": True,
                 "WEB_TLS_CERT": "", "WEB_SECRET_KEY": "", "WEB_COOKIE_SECURE": False,
                 "WEB_HOST_PORT": "8080", "WEB_COOKIE_NAME": ""}
         base.update(self.overrides)

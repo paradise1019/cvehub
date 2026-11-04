@@ -39,9 +39,11 @@ def affected(con, min_priority="medium", date_from=None, date_to=None, host=None
     """每個 (CVE, 套件) 一列：待更新／尚無修正的主機數與部分主機名稱。state：""｜pending｜nofix
 
     主機多（數百台）時：尚無修正每個版本只查一次（所有主機的套件聯集），主機用 id 記錄，名稱只在輸出時展開。"""
-    hosts = {h["id"]: h["hostname"] for h in con.execute("SELECT id, hostname FROM host WHERE active=1")}
+    rows = con.execute("SELECT id, hostname, fqdn FROM host WHERE active=1").fetchall()
+    hosts = {h["id"]: h["hostname"] for h in rows}
+    fqdn = {h["id"]: h["fqdn"] for h in rows}
     if host:
-        hosts = {k: n for k, n in hosts.items() if host.lower() in n.lower()}
+        hosts = {k: n for k, n in hosts.items() if host.lower() in n.lower() or host.lower() in (fqdn[k] or "").lower()}
     exc = active_exceptions(con)
     fsql, fargs = _cve_filter(min_priority, date_from, date_to)
     hits = {}            # (cve, source) -> {"pending": {hid: 說明}, "nofix": [hid], "codes": set(), "prio", "pub"}
@@ -63,7 +65,7 @@ def affected(con, min_priority="medium", date_from=None, date_to=None, host=None
             src = f["source"] or f["package"]
             pending.add((f["host_id"], f["cve"], src))
             note = "%s→%s %s" % (f["running"] or f["installed"], f["fixed"], f["action"])
-            e = excepted(exc, hosts[f["host_id"]], f["cve"]) if exc else None
+            e = excepted(exc, hosts[f["host_id"]], f["cve"], fqdn[f["host_id"]]) if exc else None
             if e:
                 note += "（例外：%s）" % e["reason"]
             slot(f["cve"], src, f["vprio"], f["published"])["pending"][f["host_id"]] = note
@@ -156,7 +158,7 @@ def cve_detail(con, cve):
             else:
                 st = "ok"
             f = (open_f or fs or [None])[0]
-            e = excepted(exc, h["hostname"], cve)
+            e = excepted(exc, h["hostname"], cve, h["fqdn"])
             hosts.append({"hostname": h["hostname"], "host_id": hid, "release": rel, "package": src, "state": st,
                           "state_label": STATE_LABEL[st], "official": text, "official_code": code,
                           "installed": f and (f["running"] or f["installed"]), "fixed": f and f["fixed"],

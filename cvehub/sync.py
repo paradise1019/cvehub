@@ -1,25 +1,41 @@
 """同步主機與套件、套用 kernel 資訊、比對 CVE、更新歷史"""
+import collections
 import datetime
 import fnmatch
 import json
 import logging
 import re
 
-from . import host_import, osv_import, vex_import
+from . import db, host_import, hostnames, osv_import, vex_import
 from .config import Config
 from .kernel import KERNEL_ABI, infer_running
-from .util import norm_release, parse_time as _parse_time
+from .util import norm_release, now, parse_time as _parse_time
 from .sources import Landscape, kernel_api, kernel_for_host, match_value, primary_ip
 from .vercmp import vercmp
 
 log = logging.getLogger(__name__)
 
 
-def now():
-    return datetime.datetime.now().isoformat(timespec="seconds")
-
-
 # ---------------------------------------------------------------- 主機同步
+
+CONTINUE_DAYS = 30      # Landscape 同步接續清單匯入建的主機：已停用的只接續這麼多天內出現過的
+
+
+def _landscape_name(c):
+    """Landscape 電腦的主機名稱（沒有 hostname 時用標題）"""
+    return c.get("hostname") or c["title"]
+
+
+def _recent(t):
+    """時間 t 在 KERNEL_API_MAX_AGE_HOURS 內"""
+    return (datetime.datetime.now() - t).total_seconds() <= Config.KERNEL_API_MAX_AGE_HOURS * 3600
+
+
+def _fresh(collected_at):
+    """kernel 資料在 KERNEL_API_MAX_AGE_HOURS 內（沒有時間或格式不對＝不算）"""
+    t = _parse_time(collected_at) if collected_at else None
+    return bool(t) and _recent(t)
+
 
 def sync_hosts(con):
     ls = Landscape()
@@ -35,10 +51,17 @@ def sync_hosts(con):
             log.warning("kernel API 讀取失敗：%s", e)
             bulk_error = True
     seen = set()
+    names = collections.Counter(hostnames.key(_landscape_name(c)) for c in comps)
+    exact = collections.Counter(hostnames.norm(_landscape_name(c)) for c in comps)
+    taken = set()                       # 這次已被接續的清單主機
+    since = (datetime.datetime.now() - datetime.timedelta(days=CONTINUE_DAYS)).isoformat(timespec="seconds")
+    # 同步開始前的快照（迴圈中途會補 landscape_id，用快照結果才不會依 API 順序而不同）：啟用中的主機，
+    # 加上 CONTINUE_DAYS 天內出現過、還沒有 landscape_id 的（可以接續的清單主機）
+    snap = db.hosts_by_key(con, hostnames.key, "active=1 OR (landscape_id IS NULL AND last_seen >= ?)", (since,))
     for c in comps:
         pk = ls.installed_packages(c["id"])
         pro = (c.get("ubuntu_pro_info") or {}).get("attached")
-        hn = c.get("hostname") or c["title"]
+        hn = _landscape_name(c)
         ip = primary_ip(c)
         k = None
         api_error = bulk_error
@@ -50,44 +73,73 @@ def sync_hosts(con):
                 api_error = True
         elif kern is not None:
             k = kern.get(match_value(hn, ip))
+        # 既有主機：先用 landscape_id 找；找不到時接續清單匯入建的同一台主機（hostnames.choose：依 HOST_MATCH_KEY；
+        # 這次 Landscape 有別台的比對鍵相同時只認名稱完全相同的。還沒有 landscape_id，啟用中或 CONTINUE_DAYS 天內出現過的：
+        # 之前的 Landscape 同步已把它停用、之後才加入 Landscape 的也接得上），弱點歷史才不會斷。不接續的情況：
+        #   有兩台以上啟用中、名稱都不完全相同的候選主機（分不出是哪一台）
+        #   清單主機已停用，而同步開始時已有啟用中、連到 Landscape 的同名主機（多半是重新註冊的電腦）
+        #   設了 LANDSCAPE_QUERY（只看得到部分電腦，無法確認名稱唯一）：log 警告
+        key = hostnames.key(hn)
+        group = snap.get(key, [])
+        cur = con.execute("SELECT * FROM host WHERE landscape_id=?", (c["id"],)).fetchone()
+        linked = cur is not None
+        if not linked:
+            rows = [r for r in group if r["landscape_id"] is None and r["id"] not in taken]
+            cand, ambiguous = hostnames.choose(rows, hn, exact_only=names[key] > 1)
+            if cand and not cand["active"] and any(r["active"] and r["landscape_id"] is not None
+                                                   and hostnames.same_machine(hostnames.full(r), hn)
+                                                   and hostnames.same_machine(hostnames.full(r), hostnames.full(cand)) for r in group):
+                cand = None
+            if exact[hostnames.norm(hn)] > 1:
+                if rows:
+                    log.warning("Landscape 有 %d 台電腦都叫 %s，不接續清單匯入建立的同名主機", exact[hostnames.norm(hn)], hn)
+            elif names[key] > 1 and not cand and hostnames.candidates(rows, hn):
+                log.warning("Landscape 有 %d 台電腦都對應到 %s（HOST_MATCH_KEY=%s），只接續名稱完全相同的清單主機",
+                            names[key], hn, Config.HOST_MATCH_KEY)
+            elif ambiguous:
+                log.warning("有多台啟用中、還沒連到 Landscape 的主機都可能是 %s（HOST_MATCH_KEY=%s），不接續", hn, Config.HOST_MATCH_KEY)
+            elif cand and Config.LANDSCAPE_QUERY:
+                log.warning("設了 LANDSCAPE_QUERY，不依名稱接續清單匯入建立的 %s%s", hn,
+                            "（兩筆都會維持啟用，請手動停用不要的那筆）" if cand["active"] else "（舊的那筆已停用）")
+            elif cand:
+                cur = cand
+                taken.add(cand["id"])
+            elif hostnames.candidates(rows, hn):
+                log.warning("沒有接續停用的同名主機（%s）：分不出是哪一台，或已有連到 Landscape 的同一台；%s 另建一筆",
+                            "、".join(hostnames.full(r) for r in hostnames.candidates(rows, hn)), hn)
         krel = kver = kcol = None
         kst = kstatus_default
         if api_error:
             # 查詢失敗（逾時、403、500…）不代表主機換了 kernel：沿用上一次取得的資料，狀態標成 error。
             # 不能退回「最新安裝的 kernel」推測，否則執行中舊 kernel 的 CVE 會被誤標成已解決。
-            prev = con.execute("SELECT kernel_release,kernel_version,kernel_collected_at FROM host WHERE landscape_id=?",
-                               (c["id"],)).fetchone()
-            if prev:
-                krel, kver, kcol = prev["kernel_release"], prev["kernel_version"], prev["kernel_collected_at"]
+            # 接續清單匯入的主機時，清單裡的 kernel 也要沒過期（KERNEL_API_MAX_AGE_HOURS）才沿用
+            if cur and (linked or _fresh(cur["kernel_collected_at"])):
+                krel, kver, kcol = cur["kernel_release"], cur["kernel_version"], cur["kernel_collected_at"]
             kst = "error"
         elif k:
             kcol = k["collected_at"]
-            t = _parse_time(kcol)
-            if t and (datetime.datetime.now() - t).total_seconds() > Config.KERNEL_API_MAX_AGE_HOURS * 3600:
+            t = _parse_time(kcol) if kcol else None
+            if t and not _recent(t):
                 kst = "stale"
             else:
                 krel, kver = infer_running(k["release"], k["version"], pk)
                 kst = "ok" if (kver and krel) else "missing"
         with con:
-            cur = con.execute("SELECT id FROM host WHERE landscape_id=?", (c["id"],)).fetchone()
-            vals = (hn, ip, c["title"], norm_release(c.get("distribution")), None if pro is None else int(bool(pro)), len(pk), now(),
-                    krel, kver, kcol, kst)
-            if cur:
-                hid = cur["id"]
-                con.execute("UPDATE host SET hostname=?,ip=?,title=?,release=?,pro_attached=?,package_count=?,last_seen=?,"
-                            "kernel_release=?,kernel_version=?,kernel_collected_at=?,kernel_status=?,active=1 WHERE id=?", vals + (hid,))
-            else:
-                hid = con.execute("INSERT INTO host(hostname,ip,title,release,pro_attached,package_count,last_seen,kernel_release,"
-                                  "kernel_version,kernel_collected_at,kernel_status,landscape_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                                  vals + (c["id"],)).lastrowid
-            con.execute("DELETE FROM host_package WHERE host_id=?", (hid,))
-            con.executemany("INSERT INTO host_package(host_id,name,version) VALUES (?,?,?)", [(hid, n, v) for n, v in pk.items()])
+            # Landscape 是權威來源：ip 一律覆寫（keep_ip 不用）。顯示的名稱最後由 refresh_names 依全部啟用中的主機決定；
+            # 這裡先保守地判斷（同步途中、或中途失敗時，畫面上也不會有兩台同名）
+            alone = names[key] == 1 and not any(r["active"] and r["id"] != (cur and cur["id"]) for r in group)
+            db.upsert_host(con, cur and cur["id"], {
+                "hostname": hostnames.stored(hn, alone), "fqdn": hn, "title": c["title"], "ip": ip, "release": norm_release(c.get("distribution")),
+                "pro_attached": None if pro is None else int(bool(pro)), "last_seen": now(),
+                "kernel_release": krel, "kernel_version": kver, "kernel_collected_at": kcol, "kernel_status": kst,
+            }, pk, landscape_id=c["id"])
         seen.add(c["id"])
         log.info("主機 %s（%s）：套件 %d、kernel %s（%s）", hn, ip or "-", len(pk), kver or "-", kst)
     with con:
         for r in con.execute("SELECT id, landscape_id FROM host WHERE active=1").fetchall():
             if r["landscape_id"] not in seen and not Config.LANDSCAPE_QUERY:
                 con.execute("UPDATE host SET active=0 WHERE id=?", (r["id"],))
+        hostnames.refresh_names(con)
     return len(comps)
 
 # ---------------------------------------------------------------- 比對
@@ -239,6 +291,27 @@ def update_findings(con, h, current):
     return new, resolved
 
 
+def prune_history(con, cutoff):
+    """紀錄表也依 HISTORY_KEEP_DAYS 刪除過期的列（和 finding 同一個 cutoff，由 run_sync 在同一個交易裡呼叫）。
+    畫面與 /healthz 會用到的列一律保留：
+      sync_run：首頁顯示的最近 5 筆、最後一次成功（/healthz 的 last_successful_sync）、最後一次完成（輸出報表的快取）
+      host_import：最新一筆（資料匯入頁）
+      osv_import／vex_import：只刪失敗的紀錄。成功的一律保留：放檔目錄靠它們的 sha256 判斷檔案匯入過了，
+        刪掉的話舊檔再放回去會被重新匯入、取代使用中的較新資料；另外保留最新一筆（/healthz 看它是否失敗）、sync_run 還參照的
+    """
+    con.execute("DELETE FROM audit_log WHERE ts < ?", (cutoff,))
+    con.execute("DELETE FROM host_import WHERE imported_at < ? AND id != (SELECT MAX(id) FROM host_import)", (cutoff,))
+    con.execute("""DELETE FROM sync_run WHERE started_at < ?
+                   AND id NOT IN (SELECT id FROM sync_run ORDER BY id DESC LIMIT 5)
+                   AND id NOT IN (SELECT COALESCE(MAX(id), 0) FROM sync_run WHERE status='ok')
+                   AND id NOT IN (SELECT COALESCE(MAX(id), 0) FROM sync_run WHERE finished_at IS NOT NULL)""", (cutoff,))
+    con.execute("""DELETE FROM osv_import WHERE imported_at < ? AND status != 'ok'
+                   AND id != (SELECT MAX(id) FROM osv_import)
+                   AND id NOT IN (SELECT osv_import_id FROM sync_run WHERE osv_import_id IS NOT NULL)""", (cutoff,))
+    con.execute("""DELETE FROM vex_import WHERE imported_at < ? AND status != 'ok'
+                   AND id != (SELECT MAX(id) FROM vex_import)""", (cutoff,))
+
+
 def run_sync(con):
     """完整流程：檢查 OSV → 同步主機 → 比對 → 更新歷史。回傳 sync_run id"""
     t0 = now()
@@ -271,6 +344,7 @@ def run_sync(con):
             con.execute("DELETE FROM finding WHERE resolved_at IS NOT NULL AND resolved_at < ?", (cutoff,))
             con.execute("UPDATE sync_run SET finished_at=?,status='ok',hosts=?,open_findings=?,new_findings=?,resolved_findings=?,"
                         "osv_import_id=? WHERE id=?", (now(), n, open_, new, res, imp["id"], rid))
+            prune_history(con, cutoff)          # 在這次標成成功之後：「最後一次成功」就是這一次
         log.info("同步完成：主機 %d、未解決 %d、新增 %d、已解決 %d", n, open_, new, res)
         from . import report
         report.write_reports(con)
@@ -288,8 +362,11 @@ def active_exceptions(con):
     return [e for e in con.execute("SELECT * FROM exception").fetchall() if not e["expires_at"] or e["expires_at"] >= today]
 
 
-def excepted(exceptions, hostname, cve):
+def excepted(exceptions, hostname, cve, fqdn=None):
+    """套用到這台主機、這個 CVE 的例外規則；主機名稱比 hostname 與 fqdn（來源回報的原樣）：
+    hostname 只存第一段時，寫成 web01.example.com、*.example.com 的規則照樣套用"""
+    names = [n.lower() for n in (hostname, fqdn) if n]
     for e in exceptions:
-        if fnmatch.fnmatch(hostname.lower(), e["host_pattern"].lower()) and fnmatch.fnmatch(cve.upper(), e["cve"].upper()):
+        if any(fnmatch.fnmatch(n, e["host_pattern"].lower()) for n in names) and fnmatch.fnmatch(cve.upper(), e["cve"].upper()):
             return e
     return None

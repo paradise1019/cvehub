@@ -5,7 +5,9 @@
 只含<b>已有修正版本、主機需要更新</b>的項目；官方還沒修正的請看「<a href="{{ url_for('impact_page') }}">受影響主機</a>」的「尚無修正」。</div>
 <form class="card" method="get">
  <input type="hidden" name="view" value="{{ view }}">
- 主機 <input name="host" value="{{ f.host or '' }}" size="14"> CVE <input name="cve" value="{{ f.cve or '' }}" size="14">
+ {% if f.hid %}<input type="hidden" name="hid" value="{{ f.hid }}">
+ 主機 <b>{{ only }}</b>（只看這一台，<a href="{{ all_hosts_url }}">改查全部主機</a>）
+ {% else %}主機 <input name="host" value="{{ f.host or '' }}" size="14">{% endif %} CVE <input name="cve" value="{{ f.cve or '' }}" size="14">
  套件 <input name="package" value="{{ f.package or '' }}" size="12">
  最低等級 <select name="priority">{% for p in ["", "critical","high","medium","low","negligible"] %}<option {% if f.priority==p %}selected{% endif %}>{{ p }}</option>{% endfor %}</select>
  狀態 <select name="status">{% for s in ["", "fix-available","fix-in-pro","no-fix"] %}<option {% if f.status==s %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>

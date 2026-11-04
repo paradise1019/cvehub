@@ -142,6 +142,16 @@ class WebTest(unittest.TestCase):
         self.assertEqual(report.safe_cell("ok"), "ok")
         self.assertEqual(report.safe_cell(3), 3)
 
+    def test_findings_hid(self):
+        self.assertEqual(self.c.get("/findings?hid=3x").status_code, 400)
+        self.assertEqual(self.c.get("/findings?hid=0").status_code, 400)
+        self.assertEqual(self.c.get("/findings?hid=%C2%B2").status_code, 400)       # Unicode 數字
+        self.assertEqual(self.c.get("/findings?hid=99999999999999999999").status_code, 400)
+        self.assertEqual(self.c.get("/findings?hid=").status_code, 200)             # 空白＝沒給
+        body = self.c.get("/findings?hid=1&host=web01&priority=high").get_data(as_text=True)
+        self.assertIn('name="hid" value="1"', body)                 # 查詢表單保留 hid，改條件後仍只看這一台
+        self.assertIn("priority=high", body.split("改查全部主機")[0].rsplit("<a", 1)[1])   # 改查全部主機保留其他條件
+
     def test_csv_export(self):
         r = self.c.get("/findings?format=csv&view=summary", headers=self.auth)
         self.assertEqual(r.status_code, 200)

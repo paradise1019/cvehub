@@ -1,0 +1,6 @@
+# 開發與 CI 用：執行環境的套件＋測試需要的套件
+#   pip install -r requirements-dev.txt
+#   python -m unittest discover -s tests -t .
+# 測試只用標準函式庫的 unittest；cli.py、auth.py 用到的 werkzeug 是 Flask 的相依套件，裝 Flask 時會一起裝
+# （2026-11-04 在只裝 requirements.txt 的乾淨環境實測 117 項全部通過，目前沒有其他缺少的套件）
+-r requirements.txt

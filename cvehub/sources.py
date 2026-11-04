@@ -10,6 +10,7 @@ import time
 import urllib.parse
 import urllib.request
 
+from . import hostnames
 from .config import Config
 
 log = logging.getLogger(__name__)
@@ -95,7 +96,7 @@ def host_key(name):
     if not name:
         return ""
     if Config.HOST_MATCH_KEY == "shortname":
-        name = name.split(".")[0]
+        name = hostnames.short(name)
     return name.lower() if Config.HOST_MATCH_CASE_INSENSITIVE else name
 
 
@@ -129,7 +130,7 @@ def kernel_for_host(hostname, ip):
     回應可以是 JSON 物件、只有一筆的 JSON 清單，或純文字（只有版本，例如 6.8.0-147.147）
     """
     c = Config
-    vals = {"hostname": hostname or "", "shortname": (hostname or "").split(".")[0], "ip": ip or ""}
+    vals = {"hostname": hostname or "", "shortname": hostnames.short(hostname or ""), "ip": ip or ""}
     url = c.KERNEL_API_URL
     for k, v in vals.items():
         url = url.replace("{%s}" % k, urllib.parse.quote(v, safe=""))

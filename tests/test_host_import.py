@@ -41,6 +41,32 @@ class HostImportTest(unittest.TestCase):
         self.assertEqual(os.listdir(Config.HOSTS_INBOX_DIR), [])
         self.assertEqual(len(os.listdir(Config.HOSTS_ARCHIVE_DIR)), 1)
 
+    def test_findings_filter_by_host_id(self):
+        """總覽與主機頁的連結用 hid：名稱互相包含（web01、web010）時不會混到別台"""
+        from cvehub import report
+        self.drop(HEADER + "web01,24.04,,,,,openssl,3.0.13-0ubuntu3\nweb010,24.04,,,,,openssl,3.0.13-0ubuntu3\n")
+        sync.run_sync(self.env.con)
+        hid = self.env.con.execute("SELECT id FROM host WHERE hostname='web01'").fetchone()[0]
+        self.assertEqual({r["hostname"] for r in report.query_findings(self.env.con, host="web01")}, {"web01", "web010"})
+        self.assertEqual({r["hostname"] for r in report.query_findings(self.env.con, host="web01", hid=hid)}, {"web01"})
+        self.assertEqual({r["hostname"] for r in report.query_findings(self.env.con, host="舊名稱", hid=hid)}, {"web01"})   # 有 hid 時不看 host
+
+    def test_trailing_dot_is_the_same_host_in_one_file(self):
+        """HOST_MATCH_KEY=hostname：同一個檔案裡 web01.example.com. 與 web01.example.com 是同一台（同一段時合併，不拒收）"""
+        from unittest import mock
+        with mock.patch.object(Config, "HOST_MATCH_KEY", "hostname"):
+            hosts = host_import.parse("hostname,release,package,version\n"
+                                      "web01.example.com.,24.04,openssl,1\nweb01.example.com,24.04,zlib1g,1\n")
+        self.assertEqual([(h["hostname"], sorted(h["packages"])) for h in hosts.values()], [("web01.example.com.", ["openssl", "zlib1g"])])
+
+    def test_note_when_inactive_same_name_hosts_are_different_machines(self):
+        host_import.apply(self.env.con, host_import.parse("hostname,release,package,version\n"
+                                                          "web01.a.example.com,24.04,openssl,1\nweb01.b.example.com,24.04,openssl,1\n"))
+        self.env.con.execute("UPDATE host SET active=0")
+        self.env.con.commit()
+        host_import.apply(self.env.con, host_import.parse("hostname,release,package,version\nweb01,24.04,openssl,1\n"), ("f.csv", "x"))
+        self.assertIn("另建一筆：web01", self.env.con.execute("SELECT message FROM host_import").fetchone()[0])
+
     def test_update_resolves_and_merge_keeps_missing_host(self):
         self.drop(HEADER + "web01,24.04,,,,,openssl,3.0.13-0ubuntu3\ndb01,24.04,,,,,openssl,3.0.13-0ubuntu3\n")
         sync.run_sync(self.env.con)
@@ -104,6 +130,7 @@ class HostImportTest(unittest.TestCase):
         self.drop(HEADER + "WEB01.example.com,24.04,,,,,openssl,3.0.13-0ubuntu3\n")
         sync.run_sync(c)
         self.assertEqual(c.execute("SELECT COUNT(*) FROM host").fetchone()[0], 1)
+        self.assertEqual(c.execute("SELECT landscape_id FROM host").fetchone()[0], 7)      # 保留：之後切回 Landscape 還能接續
 
     def test_unexpected_error_is_archived_not_stuck(self):
         """vercmp 無法比較的版本、或其他非預期錯誤：記成失敗並移出放檔目錄，之後的同步照常"""
@@ -208,36 +235,6 @@ class HostImportTest(unittest.TestCase):
         self.assertEqual({k: (v["release"], v["ip"]) for k, v in h.items()},
                          {"old01": ("24.04", ""), "new01": ("24.04", "10.0.0.21"), "man01": ("24.04", "10.0.0.22")})
 
-    def test_bad_ip_ignored_not_fatal(self):
-        for bad in ("10.0.0.1 x", "cafe", "10.0.0", "999.1.1.1", "0"):
-            h = host_import.parse("hostname,ip,release,package,version\nh,%s,24.04,openssl,3.0.13-0ubuntu3\n" % bad)["h"]
-            self.assertEqual((h["ip"], h["ip_bad"][0]), ("", bad), bad)
-        h = host_import.parse("hostname,ip,release,package,version\nh,2001:DB8::1,24.04,openssl,3.0.13-0ubuntu3\n"
-                              "h,2001:db8::1,24.04,curl,8.5.0-2ubuntu10\n")["h"]           # 不同寫法視為同一個
-        self.assertEqual(h["ip"], "2001:db8::1")
-        with self.assertRaises(host_import.ImportError_) as e:                      # 兩個合法但不同：可能是兩台同名
-            host_import.parse("hostname,ip,release,package,version\nh,10.0.0.1,24.04,openssl,3.0.13-0ubuntu3\n"
-                              "h,10.0.0.9,24.04,curl,8.5.0-2ubuntu10\n")
-        self.assertIn("同名", str(e.exception))
-        rows = ("h,,24.04,,a0,1\nh,10.0.0.1,24.04,2026-11-01T01:00:00Z,a1,1\n"           # 同名的第二台：IP 和收集時間都不同
-                + "".join("h,10.0.0.2,24.04,2026-11-01T02:00:00Z,p%d,1\n" % i for i in range(30)) + "x,,99.99,,b,1\n")
-        with self.assertRaises(host_import.ImportError_) as e:
-            host_import.parse("hostname,ip,release,collected_at,package,version\n" + rows)
-        msg = str(e.exception)
-        self.assertEqual(msg.count("同名"), 1)                                       # 每台只報一次
-        self.assertIn("和第 3 列不同", msg)                                          # 指向真正帶那個 IP 的列
-        self.assertIn("99.99", msg)                                                   # 其他主機的錯誤沒有被蓋掉
-        self.drop("hostname,ip,release,package,version\nweb01,10.0.0.21,24.04,openssl,3.0.13-0ubuntu3\n")
-        sync.run_sync(self.env.con)
-        self.drop("hostname,ip,release,package,version\nweb01,cafe,24.04,openssl,3.0.13-0ubuntu3\n", "second.csv")
-        sync.run_sync(self.env.con)
-        r = self.env.con.execute("SELECT status, message FROM host_import ORDER BY id DESC").fetchone()
-        self.assertEqual(r["status"], "ok")
-        self.assertIn("web01", r["message"])
-        self.assertEqual(self.env.con.execute("SELECT ip FROM host WHERE hostname='web01'").fetchone()[0], "10.0.0.21")   # 保留原本的
-        with self.assertRaises(host_import.ImportError_):     # 資料中間的 U+FEFF 不會被默默拿掉
-            host_import.parse("hostname,release,package,version\nweb\ufeff01,24.04,openssl,3.0.13-0ubuntu3\n")
-
     def test_same_value_in_different_forms_is_not_a_conflict(self):
         text = ("hostname,release,pro,kernel_release,kernel_version,collected_at,package,version\n"
                 "h,22.04,yes,6.8.0-49-generic,Ubuntu 6.8.0-49.49~22.04.1-generic 6.8.12,2026-11-01T01:00:00Z,openssl,3.0.2-0ubuntu1.18\n"
@@ -245,31 +242,6 @@ class HostImportTest(unittest.TestCase):
         Config.UBUNTU_RELEASES = ["22.04", "24.04"]
         h = host_import.parse(text)["h"]
         self.assertEqual((h["release"], h["pro"], h["kernel_version"]), ("22.04", 1, "6.8.0-49.49~22.04.1"))
-
-    def test_valid_and_bad_ip_on_one_host_is_a_conflict(self):
-        with self.assertRaises(host_import.ImportError_) as e:
-            host_import.parse("hostname,ip,release,package,version\nh,10.0.0.1,24.04,openssl,3.0.13-0ubuntu3\n"
-                              "h,bad,24.04,curl,8.5.0-2ubuntu10\n")
-        self.assertIn("同名", str(e.exception))
-
-    def test_two_different_bad_ips_conflict(self):
-        with self.assertRaises(host_import.ImportError_) as e:
-            host_import.parse("hostname,ip,release,package,version\nh,cafe,24.04,openssl,3.0.13-0ubuntu3\n"
-                              "h,dead,24.04,curl,8.5.0-2ubuntu10\n")
-        self.assertIn("同名", str(e.exception))
-        h = host_import.parse("hostname,ip,release,package,version\nh,cafe,24.04,openssl,3.0.13-0ubuntu3\n"
-                              "h,cafe,24.04,curl,8.5.0-2ubuntu10\n")["h"]           # 同一個錯誤 IP：只略過
-        self.assertEqual(h["ip"], "")
-
-    def test_two_snapshots_of_one_host_rejected(self):
-        """同一台主機新舊兩次收集的檔案串在一起：不能合併（舊檔裡已移除的套件會被誤報）"""
-        with self.assertRaises(host_import.ImportError_) as e:
-            host_import.parse("hostname,release,collected_at,package,version\n"
-                              "h,24.04,2026-01-01T00:00:00Z,oldpkg,1.0\nh,24.04,2026-11-01T00:00:00Z,openssl,3.0.13-0ubuntu3\n")
-        self.assertIn("兩次收集", str(e.exception))
-        h = host_import.parse("hostname,release,collected_at,package,version\n"     # 同一次收集：同一個字串
-                              "h,24.04,2026-11-01T00:00:00Z,a,1.0\nh,24.04,2026-11-01T00:00:00Z,b,1.0\n")["h"]
-        self.assertEqual(len(h["packages"]), 2)
 
     def test_field_error_points_at_the_row_that_set_it(self):
         with self.assertRaises(host_import.ImportError_) as e:
@@ -285,6 +257,143 @@ class HostImportTest(unittest.TestCase):
         text = ('\ufeffhostname,release,package,version\na,24.04,openssl,3.0.13-0ubuntu3\n'
                 '\ufeff"hostname","release","package","version"\n"b","24.04","curl","8.5.0-2ubuntu10"\n')
         self.assertEqual(sorted(host_import.parse(text)), ["a", "b"])
+
+    def test_same_host_in_two_segments_rejected(self):
+        """每列欄位名稱開始一段（一次收集）：同一個名稱出現在兩段＝兩台同名或兩次收集，欄位都一樣也拒收"""
+        seg = "hostname,ip,release,collected_at,package,version\n"
+        for second in ("web01,,24.04,,curl,8.5.0-2ubuntu10\n",                          # 欄位全部相同、IP 空白
+                       "web01,10.0.0.9,24.04,2026-11-01T00:00:00Z,curl,8.5.0-2ubuntu10\n"):
+            with self.assertRaises(host_import.ImportError_) as e:
+                host_import.parse(seg + "web01,,24.04,,openssl,3.0.13-0ubuntu3\n" + seg + second)
+            self.assertIn("出現在兩段資料裡（第 1 列與第 3 列開始的兩段）", str(e.exception))
+        rows = "".join("web01,,24.04,,p%d,1\n" % i for i in range(30))                 # 每台只報一次
+        with self.assertRaises(host_import.ImportError_) as e:
+            host_import.parse(seg + "web01,,24.04,,a,1\n" + seg + rows + "x,,99.99,,b,1\n")
+        self.assertEqual(str(e.exception).count("出現在兩段資料裡"), 1)
+        self.assertIn("99.99", str(e.exception))
+        h = host_import.parse(seg + "a,,24.04,,openssl,1\nb,,24.04,,curl,1\na,,24.04,,less,1\n")      # 同一段裡交錯：沒問題
+        self.assertEqual(len(h["a"]["packages"]), 2)
+
+    def test_inconsistent_fields_in_one_collection(self):
+        with self.assertRaises(host_import.ImportError_) as e:
+            host_import.parse("%sh,10.0.0.1,24.04,openssl,1\nh,10.0.0.2,24.04,curl,1\n" % "hostname,ip,release,package,version\n")
+        self.assertIn("前後不一致", str(e.exception))
+        h = host_import.parse("hostname,release,collected_at,package,version\n"
+                              "h,24.04,2026-11-01T00:00:00Z,a,1\nh,24.04,2026-11-01T00:00:00+00:00,b,1\n")["h"]   # 同一個時間的兩種寫法
+        self.assertEqual(len(h["packages"]), 2)
+        with self.assertRaises(host_import.ImportError_) as e:                     # 拿掉標題列串接的新舊檔：只有一段
+            host_import.parse("hostname,release,collected_at,package,version\n"
+                              "h,24.04,2026-01-01T00:00:00Z,oldpkg,1.0\nh,24.04,2026-11-01T00:00:00Z,openssl,3.0.13-0ubuntu3\n")
+        self.assertIn("兩次收集", str(e.exception))
+
+    def test_bad_ip_skipped(self):
+        for bad in ("10.0.0.1 x", "cafe", "10.0.0", "999.1.1.1", "0"):
+            h = host_import.parse("%sh,%s,24.04,openssl,3.0.13-0ubuntu3\n" % ("hostname,ip,release,package,version\n", bad))["h"]
+            self.assertEqual((h["ip"], h["ip_bad"]), ("", bad), bad)
+        h = host_import.parse("hostname,ip,release,package,version\nh,cafe,24.04,a,1\nh,10.0.0.1,24.04,b,1\nh,dead,24.04,c,1\n")["h"]
+        self.assertEqual(h["ip"], "10.0.0.1")                                       # 格式不對的略過，用合法的
+
+    def test_ip_storage(self):
+        """有合法的就寫入；沒有欄位／空白／佔位字＝清掉；只有格式不對的值＝保留原本的"""
+        def imp(csv_text, name):
+            self.drop(csv_text, name)
+            sync.run_sync(self.env.con)
+            return self.env.con.execute("SELECT ip FROM host WHERE hostname='web01'").fetchone()[0]
+        H = "hostname,ip,release,package,version\n"
+        self.assertEqual(imp(H + "web01,10.0.0.21,24.04,openssl,3.0.13-0ubuntu3\n", "1.csv"), "10.0.0.21")
+        self.assertEqual(imp(H + "web01,cafe,24.04,openssl,3.0.13-0ubuntu3\n", "2.csv"), "10.0.0.21")        # 格式不對：保留
+        self.assertIn("web01", self.env.con.execute("SELECT message FROM host_import ORDER BY id DESC").fetchone()[0])
+        self.assertIsNone(imp(H + "web01,N/A,24.04,openssl,3.0.13-0ubuntu3\n", "3.csv"))                   # 佔位字：清掉
+        imp(H + "web01,10.0.0.21,24.04,openssl,3.0.13-0ubuntu3\n", "4.csv")
+        self.assertIsNone(imp("hostname,release,package,version\nweb01,24.04,openssl,3.0.13-0ubuntu3\n", "5.csv"))   # 沒有欄位：清掉
+
+    # ---- 0.9.3 review 修正的測試 ----
+
+    def test_same_host_in_two_segments_rejected_even_if_fields_match(self):
+        """同一個主機名稱出現在兩段（各有自己的標題列）：就算欄位全部相同或空白，也是兩台同名或兩次收集，不能合併"""
+        seg = "hostname,ip,release,package,version\n"
+        with self.assertRaises(host_import.ImportError_) as e:
+            host_import.parse(seg + "web01,,24.04,openssl,3.0.13-0ubuntu3\n"
+                              + seg + "web01,,24.04,openssl,3.0.13-0ubuntu1\n")
+        msg = str(e.exception)
+        self.assertIn("web01", msg)
+        self.assertIn("同名", msg)
+        self.assertIn("第 4 列", msg)          # 指向第二段裡那台主機的第一列
+        with self.assertRaises(host_import.ImportError_):        # 名稱不分大小寫
+            host_import.parse(seg + "web01,,24.04,a,1\n" + seg + "WEB01,,24.04,b,1\n")
+
+    def test_same_host_many_rows_in_one_segment_ok(self):
+        """同一段裡同一台主機很多列（正常情況）、不同主機各一段：照常匯入"""
+        seg = "hostname,release,package,version\n"
+        h = host_import.parse(seg + "a,24.04,openssl,3.0.13-0ubuntu3\na,24.04,curl,8.5.0-2ubuntu10\n"
+                              + seg + "b,24.04,openssl,3.0.13-0ubuntu3\n")
+        self.assertEqual(sorted(h), ["a", "b"])
+        self.assertEqual(len(h["a"]["packages"]), 2)
+
+    def test_same_host_in_two_segments_reported_once(self):
+        """同一台出現在三段：只報一次，其他主機的錯誤不被蓋掉"""
+        seg = "hostname,release,package,version\n"
+        with self.assertRaises(host_import.ImportError_) as e:
+            host_import.parse(seg + "h,24.04,a,1\n" + seg + "h,24.04,b,1\n" + seg + "h,24.04,c,1\n"
+                              + seg + "x,99.99,d,1\n")
+        msg = str(e.exception)
+        self.assertEqual(msg.count("同名"), 1)
+        self.assertIn("99.99", msg)
+
+    def test_collected_at_same_instant_different_notation_not_conflict(self):
+        """同一個時間點的不同寫法（Z／+00:00／+08:00／小數秒）不算兩次收集"""
+        for a, b in (("2026-11-01T00:00:00Z", "2026-11-01T00:00:00+00:00"),
+                     ("2026-11-01T00:00:00Z", "2026-11-01T08:00:00+08:00"),
+                     ("2026-11-01T00:00:00Z", "2026-11-01T00:00:00.000Z")):
+            h = host_import.parse("hostname,release,collected_at,package,version\n"
+                                  "h,24.04,%s,a,1\nh,24.04,%s,b,1\n" % (a, b))["h"]
+            self.assertEqual(len(h["packages"]), 2, (a, b))
+
+    def test_collected_at_different_instant_still_conflict(self):
+        with self.assertRaises(host_import.ImportError_) as e:
+            host_import.parse("hostname,release,collected_at,package,version\n"
+                              "h,24.04,2026-11-01T00:00:00Z,a,1\nh,24.04,2026-11-01T00:00:01Z,b,1\n")
+        self.assertIn("兩次收集", str(e.exception))
+
+    def test_collected_at_invalid_still_reported(self):
+        """不是 ISO 8601 的值仍要報錯（比對改用解析後的時間，不能因此漏掉格式錯誤）"""
+        with self.assertRaises(host_import.ImportError_) as e:
+            host_import.parse("hostname,release,collected_at,package,version\nh,24.04,garbage,a,1\nh,24.04,garbage,b,1\n")
+        self.assertIn("ISO 8601", str(e.exception))
+
+    def _ip_of(self, hostname="web01"):
+        return self.env.con.execute("SELECT ip FROM host WHERE hostname=?", (hostname,)).fetchone()[0]
+
+    def test_ip_cleared_when_new_import_has_no_ip(self):
+        """新的匯入沒有 IP（沒有 ip 欄位、空白、佔位字）：清掉舊的 IP，不沿用過時的位址"""
+        cases = ("hostname,release,package,version\nweb01,24.04,openssl,3.0.13-0ubuntu3\n",          # 沒有 ip 欄位
+                 "hostname,ip,release,package,version\nweb01,,24.04,openssl,3.0.13-0ubuntu3\n",      # 空白
+                 "hostname,ip,release,package,version\nweb01,N/A,24.04,openssl,3.0.13-0ubuntu3\n")   # 佔位字
+        for i, text in enumerate(cases):
+            self.drop("hostname,ip,release,package,version\nweb01,10.0.0.21,24.04,openssl,3.0.13-0ubuntu3\n", "a%d.csv" % i)
+            sync.run_sync(self.env.con)
+            self.assertEqual(self._ip_of(), "10.0.0.21")
+            self.drop(text, "b%d.csv" % i)
+            sync.run_sync(self.env.con)
+            self.assertIsNone(self._ip_of(), text)
+
+    def test_ip_kept_only_when_malformed(self):
+        """只有 IP 格式不對時才保留原本的 IP，並在匯入紀錄註明"""
+        self.drop("hostname,ip,release,package,version\nweb01,10.0.0.21,24.04,openssl,3.0.13-0ubuntu3\n")
+        sync.run_sync(self.env.con)
+        self.drop("hostname,ip,release,package,version\nweb01,cafe,24.04,openssl,3.0.13-0ubuntu3\n", "second.csv")
+        sync.run_sync(self.env.con)
+        self.assertEqual(self._ip_of(), "10.0.0.21")
+        r = self.env.con.execute("SELECT status, message FROM host_import ORDER BY id DESC").fetchone()
+        self.assertEqual(r["status"], "ok")
+        self.assertIn("web01", r["message"])
+
+    def test_ip_replaced_by_new_valid_ip(self):
+        self.drop("hostname,ip,release,package,version\nweb01,10.0.0.21,24.04,openssl,3.0.13-0ubuntu3\n")
+        sync.run_sync(self.env.con)
+        self.drop("hostname,ip,release,package,version\nweb01,10.0.0.99,24.04,openssl,3.0.13-0ubuntu3\n", "second.csv")
+        sync.run_sync(self.env.con)
+        self.assertEqual(self._ip_of(), "10.0.0.99")
 
     def test_multiarch_takes_newer(self):
         h = host_import.parse("hostname,release,package,version\nh,24.04,libc6:amd64,2.39-0ubuntu8.4\nh,24.04,libc6:i386,2.39-0ubuntu8.3\n")["h"]

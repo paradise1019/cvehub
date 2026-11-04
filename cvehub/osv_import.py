@@ -1,7 +1,6 @@
 """匯入 Canonical OSV（osv-all.tar.xz）：直接讀壓縮檔（不解壓到磁碟），整批替換、失敗保留舊資料"""
 import datetime
 import glob
-import hashlib
 import json
 import logging
 import os
@@ -10,20 +9,9 @@ import tarfile
 
 from .config import Config
 from .kernel import kernel_variant
+from .util import now as _now, sha256_file as _sha256
 
 log = logging.getLogger(__name__)
-
-
-def _now():
-    return datetime.datetime.now().isoformat(timespec="seconds")
-
-
-def _sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for b in iter(lambda: f.read(1 << 20), b""):
-            h.update(b)
-    return h.hexdigest()
 
 
 def wanted_ecosystems(releases):

@@ -12,20 +12,24 @@ COLUMNS = ["hostname", "release", "cve", "priority", "status", "package", "insta
            "location", "action", "repo", "source", "first_seen", "last_seen", "resolved_at", "exception"]
 
 
-def query_findings(con, host=None, cve=None, priority=None, status=None, state="open", show_excepted=True, package=None):
+def query_findings(con, host=None, cve=None, priority=None, status=None, state="open", show_excepted=True, package=None, hid=None):
     """
+    host: 名稱的一部分（顯示名稱或完整名稱）；hid: 只看這一台（host.id，主機頁與總覽的連結用，名稱互相包含時才不會混到別台；有 hid 時不看 host）
     state: open（未解決）| resolved（已解決）| all
     priority: 最低等級（例如 high＝high 和 critical）
     """
-    sql = ["SELECT f.*, h.hostname, h.release FROM finding f JOIN host h ON h.id=f.host_id WHERE h.active=1"]
+    sql = ["SELECT f.*, h.hostname, h.fqdn, h.release FROM finding f JOIN host h ON h.id=f.host_id WHERE h.active=1"]
     args = []
     if state == "open":
         sql.append("AND f.resolved_at IS NULL")
     elif state == "resolved":
         sql.append("AND f.resolved_at IS NOT NULL")
-    if host:
-        sql.append("AND h.hostname LIKE ?")
-        args.append("%" + host + "%")
+    if hid:                         # 有 hid 時 host 只是顯示用（名稱改過也照樣找得到）
+        sql.append("AND h.id=?")
+        args.append(hid)
+    elif host:
+        sql.append("AND (h.hostname LIKE ? OR h.fqdn LIKE ?)")
+        args += ["%" + host + "%"] * 2
     if cve:
         sql.append("AND f.cve LIKE ?")
         args.append("%" + cve.upper() + "%")
@@ -41,7 +45,7 @@ def query_findings(con, host=None, cve=None, priority=None, status=None, state="
     for r in con.execute(" ".join(sql), args):
         if PRIO.get(r["priority"] or "", 5) > minp:
             continue
-        e = excepted(exc, r["hostname"], r["cve"])
+        e = excepted(exc, r["hostname"], r["cve"], r["fqdn"])
         if e and not show_excepted:
             continue
         d = dict(r)

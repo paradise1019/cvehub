@@ -286,10 +286,16 @@ done
 rm -f -- "$INCOMPLETE"                        # 之後再執行 install.sh 就是更新
 
 port="$(docker compose port cvehub 8080 2>/dev/null | head -1 | sed 's/.*://' || true)"      # 實際發布的 port（含 override）
+# 網址的主機部分：WEB_HOST_PORT 指定了 IPv4（不是 0.0.0.0）就用它，否則用這台主機的第一個 IP
+if [[ "$WEB_HOST_PORT" == *:* && "${WEB_HOST_PORT%:*}" != 0.0.0.0 && "$WEB_HOST_PORT" != \[* ]]; then
+    web_host="${WEB_HOST_PORT%:*}"
+else
+    web_host="$(hostname -I | awk '{print $1}')"
+fi
 cat <<EOF
 
 ✅ cvehub $VERSION 已安裝並啟動
-   網頁：http://$([[ "$WEB_HOST_PORT" == *:* && "${WEB_HOST_PORT%:*}" != 0.0.0.0 && "$WEB_HOST_PORT" != \[* ]] && echo "${WEB_HOST_PORT%:*}" || hostname -I | awk '{print $1}'):${port:-${WEB_HOST_PORT##*:}}/
+   網頁：http://$web_host:${port:-${WEB_HOST_PORT##*:}}/
 
 接下來（都在網頁「資料匯入」頁，用管理員登入）：
    1. 上傳 osv-all.tar.xz 與 vex-all.tar.xz（在能上網的電腦下載）

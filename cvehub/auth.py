@@ -15,6 +15,7 @@ import sqlite3
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from . import db
+from .util import now as _now
 from .config import Config
 
 log = logging.getLogger(__name__)
@@ -26,10 +27,6 @@ LOCK_AFTER = 5
 LOCK_MINUTES = 15
 # 拿來比對不存在帳號的假雜湊：讓「帳號不存在」和「密碼錯」花一樣的時間
 _DUMMY_HASH = generate_password_hash("not-a-real-password-" + secrets.token_hex(8))
-
-
-def _now():
-    return datetime.datetime.now().isoformat(timespec="seconds")
 
 
 def audit(con, user, ip, action, detail=""):

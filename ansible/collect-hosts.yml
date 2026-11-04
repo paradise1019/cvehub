@@ -12,7 +12,9 @@
 #   cvehub_hosts     要收集的主機（inventory 群組或樣式），預設 all
 #   cvehub_out       輸出檔，預設執行者家目錄下 cvehub-hosts-<日期時間>.csv
 #   cvehub_hostname  CSV 裡的主機名稱，預設 inventory 名稱
-#   cvehub_ip        CSV 裡的 IP（只用來顯示），預設這台主機對外的主要 IPv4（預設路由的來源位址，查不到時用 hostname -I 的第一個）
+#   cvehub_ip        CSV 裡的 IP（只用來顯示）。沒指定時：SSH 連線用實際連進這台主機的位址（SSH_CONNECTION 的主機端，
+#                    ssh_config 別名、跳板機都正確）；本機或其他連線方式、或得到 loopback 時，用 hostname -I 的第一個。
+#                    多張網卡（docker、VPN…）或用 -e ansible_become=true 執行時可能不準，請直接設 cvehub_ip
 
 - name: 收集主機清單給 cvehub
   hosts: "{{ cvehub_hosts | default('all') }}"
@@ -38,11 +40,17 @@
         if command -v pro >/dev/null 2>&1; then
           pro=$(pro status --format json 2>/dev/null | python3 -c 'import json,sys; print("yes" if json.load(sys.stdin).get("attached") else "no")' 2>/dev/null || true)
         fi
-        addr=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") {print $(i + 1); exit}}' || true)
-        [ -n "$addr" ] || addr=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
-        [ -z "${CVEHUB_IP:-}" ] || addr="$CVEHUB_IP"
-        # 擋掉會弄亂 CSV 的字元（逗號、引號、空白…）；是否為合法位址由 cvehub 匯入時檢查，不合法只會略過 IP
-        case "$addr" in *[!0-9A-Za-z.:%_-]*) echo "cvehub_ip／IP 含不合法的字元，這台不填 IP：$addr" >&2; addr="" ;; esac
+        addr=""
+        if [ -n "${CVEHUB_SSH:-}" ]; then                          # SSH 連線：實際連進來的位址（本機連線時這是操作者自己的連線，不能用）
+          addr=$(echo "${SSH_CONNECTION:-}" | awk '{print $3}')
+          [ -n "$addr" ] || echo "沒有 SSH_CONNECTION（可能被 sudo 清掉），IP 改用 hostname -I" >&2
+        fi
+        case "$addr" in ::ffff:*.*) addr="${addr#::ffff:}" ;; esac   # dual-stack 的 sshd 收 IPv4 連線：::ffff:10.0.0.5 → 10.0.0.5
+        case "$addr" in 127.*|::1) addr="" ;; esac
+        [ -n "$addr" ] || addr=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v -e '^127\.' -e '^::1$' -e '^$' | head -n 1 || true)
+        [ -z "${CVEHUB_IP:-}" ] || addr="$CVEHUB_IP"                # 手動指定的優先
+        # 會弄亂 CSV 的字元（逗號、引號、空白…）：輸出「格式不對」，cvehub 匯入時保留原本的 IP 並註明（輸出空白會清掉 IP）
+        case "$addr" in *[!0-9A-Za-z.:%_-]*) echo "cvehub_ip／IP 含不合法的字元：$addr" >&2; addr="invalid-ip" ;; esac
         krel=$(uname -r)
         kver=$(awk '{print $2}' /proc/version_signature 2>/dev/null || true)
         now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -55,6 +63,9 @@
       environment:
         HOST: "{{ cvehub_hostname | default(inventory_hostname) }}"
         CVEHUB_IP: "{{ cvehub_ip | default('') }}"
+        CVEHUB_SSH: "{{ '1' if (ansible_connection | default('ssh') | regex_replace('^ansible\\.(builtin|legacy)\\.', '')) in ['ssh', 'smart', 'paramiko', 'paramiko_ssh'] else '' }}"
+      vars:
+        ansible_become: false     # 優先於 inventory／group_vars 的 ansible_become：sudo 會清掉 SSH_CONNECTION
       register: cvehub_csv
       changed_when: false
       check_mode: false

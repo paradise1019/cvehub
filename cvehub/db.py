@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS host (
     id INTEGER PRIMARY KEY,
     landscape_id INTEGER UNIQUE,
     hostname TEXT NOT NULL,
+    fqdn TEXT,                     -- 來源回報的名稱原樣（hostname 依 HOST_MATCH_KEY 可能只存第一段）
     ip TEXT,
     title TEXT,
     release TEXT,
@@ -132,6 +133,7 @@ CREATE TABLE IF NOT EXISTS finding (
 );
 CREATE INDEX IF NOT EXISTS finding_open ON finding(resolved_at, host_id);
 CREATE INDEX IF NOT EXISTS finding_cve ON finding(cve);
+DROP INDEX IF EXISTS host_lname;                -- 0.9.4 開發中曾建立，已不用
 
 -- 例外／風險接受
 CREATE TABLE IF NOT EXISTS exception (
@@ -211,6 +213,9 @@ def init(con):
     cols = {r[1] for r in con.execute("PRAGMA table_info(host)")}
     if "ip" not in cols:
         con.execute("ALTER TABLE host ADD COLUMN ip TEXT")
+    if "fqdn" not in cols:
+        con.execute("ALTER TABLE host ADD COLUMN fqdn TEXT")
+        con.execute("UPDATE host SET fqdn=hostname")              # 0.9.4 之前 hostname 都是原樣
     cols = {r[1] for r in con.execute("PRAGMA table_info(osv_import)")}
     if "release_counts" not in cols:
         con.execute("ALTER TABLE osv_import ADD COLUMN release_counts TEXT")
@@ -220,3 +225,39 @@ def init(con):
     if "details" not in cols:
         con.execute("ALTER TABLE vuln ADD COLUMN details TEXT")      # 0.4.0：重新匯入 OSV 後才有內容
     con.commit()
+
+
+HOST_COLUMNS = ("hostname", "fqdn", "title", "ip", "release", "pro_attached", "last_seen",
+                "kernel_release", "kernel_version", "kernel_collected_at", "kernel_status")
+
+
+def hosts_by_key(con, keyfn, where="1", params=(), cols="*"):
+    """依名稱比對鍵分組的主機：{keyfn(完整名稱): [row, …]}，每組新的在前（cols 要含 hostname、fqdn）。
+    同步／匯入開始前一次讀進來（不用每台各查一次；也不會因為處理順序不同，前面寫入的影響後面的判斷）"""
+    groups = {}
+    for r in con.execute("SELECT %s FROM host WHERE %s ORDER BY id DESC" % (cols, where), params):
+        groups.setdefault(keyfn(r["fqdn"] or r["hostname"]), []).append(r)
+    return groups
+
+
+def upsert_host(con, existing_id, fields, packages, keep_ip=False, landscape_id=None):
+    """寫入一台主機（Landscape 同步與主機清單匯入共用）；不自己開交易，由呼叫端決定範圍。回傳 host id
+      existing_id：呼叫端找到的既有主機（找法各來源不同），None＝新增
+      fields：HOST_COLUMNS 的值（package_count 由 packages 算）；寫入後一律 active=1
+      packages：{套件名稱: 版本}，整份取代這台主機原本的套件清單
+      keep_ip：True＝不改原本的 ip（主機清單裡只有格式不對的 ip 時）
+      landscape_id：有值時寫入（既有主機原本沒有時補上）；None＝不動原本的
+    """
+    if existing_id:
+        cols = [k for k in HOST_COLUMNS if k != "ip"]
+        con.execute("UPDATE host SET %s,ip=CASE WHEN ? THEN ip ELSE ? END,package_count=?,"
+                    "landscape_id=COALESCE(?,landscape_id),active=1 WHERE id=?" % ",".join("%s=?" % k for k in cols),
+                    tuple(fields[k] for k in cols) + (int(bool(keep_ip)), fields["ip"], len(packages), landscape_id, existing_id))
+        hid = existing_id
+    else:
+        hid = con.execute("INSERT INTO host(%s,package_count,landscape_id) VALUES (%s)"
+                          % (",".join(HOST_COLUMNS), ",".join("?" * (len(HOST_COLUMNS) + 2))),
+                          tuple(fields[k] for k in HOST_COLUMNS) + (len(packages), landscape_id)).lastrowid
+    con.execute("DELETE FROM host_package WHERE host_id=?", (hid,))
+    con.executemany("INSERT INTO host_package(host_id,name,version) VALUES (?,?,?)", [(hid, n, v) for n, v in packages.items()])
+    return hid

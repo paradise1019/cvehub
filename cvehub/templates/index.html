@@ -16,7 +16,7 @@
 <tr><td><a href="{{ url_for('host', hid=h.id) }}">{{ h.hostname }}</a></td><td>{{ h.ip or '' }}</td><td>{{ h.release }}</td>
  <td>{{ {1:'是',0:'否'}.get(h.pro_attached, '?') }}</td><td class="num">{{ h.package_count }}</td>
  <td>{% if h.kernel_status == 'ok' %}{{ h.kernel_version }}{% elif h.kernel_status == 'error' and h.kernel_version %}{{ h.kernel_version }} <span class="muted">（查詢失敗，沿用上次資料）</span>{% else %}<span class="muted">{{ {'stale':'資料過期','missing':'無資料','disabled':'未設定 kernel API','error':'查詢失敗'}.get(h.kernel_status, h.kernel_status) }}</span>{% endif %}</td>
- {% for p in ["critical","high","medium","low"] %}<td class="num">{% if c.get(p) %}<a href="{{ url_for('findings', view='summary', host=h.hostname, priority=p) }}">{{ c.get(p) }}</a>{% else %}0{% endif %}</td>{% endfor %}
+ {% for p in ["critical","high","medium","low"] %}<td class="num">{% if c.get(p) %}<a href="{{ url_for('findings', view='summary', hid=h.id, host=h.hostname, priority=p) }}">{{ c.get(p) }}</a>{% else %}0{% endif %}</td>{% endfor %}
  <td>{% if c.get('reboot') %}<b>是</b>{% endif %}</td><td class="muted">{{ h.last_seen }}</td></tr>
 {% endfor %}</table>
 <h3>最近同步</h3>

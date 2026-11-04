@@ -339,7 +339,21 @@ def create_app(start_scheduler=True):
     def _filters():
         a = request.args
         return {k: a.get(k) or None for k in ("host", "cve", "priority", "status", "package")} | {
-            "state": a.get("state") or "open", "show_excepted": a.get("excepted", "1") == "1"}
+            "state": _state(), "show_excepted": a.get("excepted", "1") == "1",
+            "hid": _hid(a.get("hid"))}
+
+    def _state():
+        """open／resolved／all；其他值（打錯）當成 open，不能變成沒有條件"""
+        v = request.args.get("state")
+        return v if v in ("open", "resolved", "all") else "open"
+
+    def _hid(v):
+        """hid 格式不對時回 400，不能當成沒給（會變成全部主機）；空白＝沒給（和其他條件一樣）"""
+        if not v:
+            return None
+        if not (v.isascii() and v.isdigit()) or not 0 < int(v) < 2 ** 63:
+            abort(400)
+        return int(v)
 
     @app.route("/findings")
     def findings():
@@ -354,7 +368,11 @@ def create_app(start_scheduler=True):
             return Response(report.to_csv(data, cols), mimetype="text/csv",
                             headers={"Content-Disposition": "attachment; filename=" + name})
         export_url = url_for("findings", **dict(request.args.to_dict(), format="csv"))
-        return render_template("findings.html", rows=data, view=view, f=f, export_url=export_url, limit=2000)
+        # 只看一台（hid）：顯示的名稱取自主機紀錄（不用網址的 host，名稱可能改過）；「改查全部主機」保留其他條件
+        only = f["hid"] and g.con.execute("SELECT hostname FROM host WHERE id=?", (f["hid"],)).fetchone()
+        all_hosts_url = url_for("findings", **{k: v for k, v in request.args.to_dict().items() if k not in ("hid", "host")})
+        return render_template("findings.html", rows=data, view=view, f=f, export_url=export_url, limit=2000,
+                               only=only["hostname"] if only else f["hid"], all_hosts_url=all_hosts_url)
 
     @app.route("/period")
     def period_report():
@@ -423,8 +441,8 @@ def create_app(start_scheduler=True):
     @app.route("/host/<int:hid>")
     def host(hid):
         h = g.con.execute("SELECT * FROM host WHERE id=?", (hid,)).fetchone() or abort(404)
-        state = request.args.get("state", "open")
-        rows = [r for r in report.query_findings(g.con, state=state) if r["host_id"] == hid]
+        state = _state()
+        rows = report.query_findings(g.con, state=state, hid=hid)
         return render_template("host.html", h=h, rows=rows, state=state)
 
     @app.route("/cve/<cve>")

@@ -1,0 +1,31 @@
+# 自動化測試：push 與 pull request 時執行
+# Python 版本和 Dockerfile 的基礎 image（python:3.12-slim）一致
+# cvetrack/ 是另一個 Django 子專案（有自己的 pyproject.toml 與測試），不在這裡執行
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安裝套件
+        run: pip install -r requirements-dev.txt
+      - name: 自動化測試
+        run: python -m unittest discover -s tests -t .
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 檢查安裝與更新腳本
+        run: shellcheck install.sh scripts/upgrade.sh

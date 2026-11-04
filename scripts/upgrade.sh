@@ -204,7 +204,9 @@ stop_all() {   # 停掉這個安裝目錄的所有 cvehub 容器（含 docker co
     fi
     cids="$(docker ps -q --filter "label=com.docker.compose.project.working_dir=$APP_DIR" --filter "label=com.docker.compose.service=cvehub")"
     if [[ -n "$cids" ]]; then
-        docker stop $cids >/dev/null || true
+        local ids
+        mapfile -t ids <<<"$cids"                      # 一行一個容器 ID
+        docker stop "${ids[@]}" >/dev/null || true
     fi
     [[ -z "$(docker ps -q --filter "label=com.docker.compose.project.working_dir=$APP_DIR" --filter "label=com.docker.compose.service=cvehub")" ]] \
         && [[ -z "$(service_cid)" || "$(docker inspect --format '{{.State.Running}}' "$(service_cid)" 2>/dev/null)" != "true" ]]
@@ -278,11 +280,11 @@ service_cid() {   # cvehub 服務容器（不含 docker compose run 的一次性
 }
 
 healthy_within() {   # 3 分鐘內 healthy 回傳 0；HEALTH_STATE 是最後看到的狀態
-    local cid i
+    local cid _
     HEALTH_STATE=""
     cid="$(service_cid)"
     [[ -n "$cid" ]] || { HEALTH_STATE="沒有啟動"; return 1; }
-    for i in $(seq 1 60); do
+    for _ in $(seq 1 60); do
         HEALTH_STATE="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || true)"
         [[ "$HEALTH_STATE" == "healthy" ]] && return 0
         sleep 3
@@ -313,6 +315,7 @@ KEEP_BACKUPS="${CVEHUB_KEEP_BACKUPS:-5}"
 
 prune_backups() {   # 只保留最近 KEEP_BACKUPS 份（每份含資料庫，約數百 MB）
     local old
+    # shellcheck disable=SC2012  # 備份目錄名稱是這支腳本產生的「時間-版本」，沒有特殊字元；要保留結尾的 /（下一行的檢查依賴它）
     ls -1d "$APP_DIR"/backups/*/ 2>/dev/null | sort | head -n -"$KEEP_BACKUPS" | while read -r old; do
         if [[ "$old" == "$APP_DIR"/backups/?*/ ]]; then
             rm -rf -- "$old"

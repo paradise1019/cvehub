@@ -8,7 +8,6 @@ VEX 的版本號是「目前最新版本」，不是第一個修正版本，所�
 import datetime
 import fnmatch
 import glob
-import hashlib
 import json
 import logging
 import os
@@ -19,6 +18,7 @@ import urllib.parse
 
 from .config import Config
 from .kernel import kernel_variant
+from .util import now as _now, sha256_file as _sha256
 
 log = logging.getLogger(__name__)
 
@@ -142,18 +142,6 @@ def iter_vex(path, releases, unknown):
                     slot[is_pro] = _better(slot[is_pro], code)
             if got:
                 yield [(k[0], k[1], k[2], v[0], v[1]) for k, v in got.items()]
-
-
-def _sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for b in iter(lambda: f.read(1 << 20), b""):
-            h.update(b)
-    return h.hexdigest()
-
-
-def _now():
-    return datetime.datetime.now().isoformat(timespec="seconds")
 
 
 def import_file(con, path):
