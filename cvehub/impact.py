@@ -9,7 +9,7 @@
 from .config import PRIO, Config
 from .kernel import kernel_variant
 from .period import cell_text, host_sources, resolve
-from .sync import active_exceptions, excepted
+from .sync import ExceptionMatcher, active_exceptions
 from .vex_import import LABEL, RANK, UNRESOLVED, status_for
 
 STATES = [("pending", "待更新"), ("nofix", "尚無修正"), ("fixed", "已修正"), ("ok", "不受影響")]
@@ -44,7 +44,7 @@ def affected(con, min_priority="medium", date_from=None, date_to=None, host=None
     fqdn = {h["id"]: h["fqdn"] for h in rows}
     if host:
         hosts = {k: n for k, n in hosts.items() if host.lower() in n.lower() or host.lower() in (fqdn[k] or "").lower()}
-    exc = active_exceptions(con)
+    match = ExceptionMatcher(active_exceptions(con))
     fsql, fargs = _cve_filter(min_priority, date_from, date_to)
     hits = {}            # (cve, source) -> {"pending": {hid: 說明}, "nofix": [hid], "codes": set(), "prio", "pub"}
 
@@ -65,7 +65,7 @@ def affected(con, min_priority="medium", date_from=None, date_to=None, host=None
             src = f["source"] or f["package"]
             pending.add((f["host_id"], f["cve"], src))
             note = "%s→%s %s" % (f["running"] or f["installed"], f["fixed"], f["action"])
-            e = excepted(exc, hosts[f["host_id"]], f["cve"], fqdn[f["host_id"]]) if exc else None
+            e = match(hosts[f["host_id"]], f["cve"], fqdn[f["host_id"]]) if match.rules else None
             if e:
                 note += "（例外：%s）" % e["reason"]
             slot(f["cve"], src, f["vprio"], f["published"])["pending"][f["host_id"]] = note
@@ -138,7 +138,7 @@ def cve_detail(con, cve):
             cells[rel] = (code, cell_text(code, pro, fx, rel))
         if any(c != "none" for c, _ in cells.values()):
             official[src] = cells
-    exc = active_exceptions(con)
+    match = ExceptionMatcher(active_exceptions(con))
     findings = {}
     for f in con.execute("SELECT * FROM finding WHERE cve=? ORDER BY resolved_at IS NULL DESC, first_seen", (cve,)):
         findings.setdefault((f["host_id"], f["source"] or f["package"]), []).append(f)
@@ -158,7 +158,7 @@ def cve_detail(con, cve):
             else:
                 st = "ok"
             f = (open_f or fs or [None])[0]
-            e = excepted(exc, h["hostname"], cve, h["fqdn"])
+            e = match(h["hostname"], cve, h["fqdn"])
             hosts.append({"hostname": h["hostname"], "host_id": hid, "release": rel, "package": src, "state": st,
                           "state_label": STATE_LABEL[st], "official": text, "official_code": code,
                           "installed": f and (f["running"] or f["installed"]), "fixed": f and f["fixed"],

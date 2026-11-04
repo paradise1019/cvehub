@@ -1,6 +1,8 @@
 """網頁與 API（Flask）"""
 import datetime
+import functools
 import hmac
+import ipaddress
 import logging
 import os
 import re
@@ -14,6 +16,7 @@ from werkzeug.exceptions import NotFound
 
 from . import __version__, auth, db, impact, osv_import, period, report, sync, vex_import
 from .lock import Busy, job_lock
+from .vercmp import vercmp
 from .config import PRIO, Config
 
 log = logging.getLogger(__name__)
@@ -35,6 +38,7 @@ def run_job(kind, path=None):
                     osv_import.import_file(con, path)
                     _status["message"] = "OSV 匯入完成，開始重新比對…"
                 sync.run_sync(con)
+            _warm_overview()                          # 先把總覽的數量算好，第一個開總覽的人不用等
             _status["message"] = "%s 完成（%s）" % (kind, sync.now())
         except Busy as e:
             _status["message"] = "%s 略過：%s" % (kind, e)
@@ -72,14 +76,57 @@ PER_PAGE = 100
 LOGIN_MAX_BODY = 16 * 1024
 
 
-def _page(rows):
-    """(這一頁的列, 頁碼, 總頁數)；頁碼來自 ?page="""
-    pages = max(1, (len(rows) + PER_PAGE - 1) // PER_PAGE)
+def _page(rows, per_page=None):
+    """(這一頁的列, 頁碼, 總頁數)；頁碼來自 ?page=，每頁列數預設 PER_PAGE"""
+    per_page = per_page or PER_PAGE
+    pages = max(1, (len(rows) + per_page - 1) // per_page)
     try:
         page = min(max(1, int(request.args.get("page", 1))), pages)
     except ValueError:
         page = 1
-    return rows[(page - 1) * PER_PAGE:page * PER_PAGE], page, pages
+    return rows[(page - 1) * per_page:page * per_page], page, pages
+
+
+# 總覽的主機清單：可排序的欄位 → 排序鍵（同值時依主機名稱）
+HOST_SORTS = {
+    "hostname": lambda h: h["hostname"].lower(),
+    "ip": lambda h: _ip_key(h["ip"]),
+    "release": lambda h: h["release"] or "",
+    "pro": lambda h: -1 if h["pro_attached"] is None else h["pro_attached"],
+    "packages": lambda h: h["package_count"] or 0,
+    "kernel": lambda h: _kernel_key(h),
+    "critical": lambda h: h["c"]["critical"], "high": lambda h: h["c"]["high"],
+    "medium": lambda h: h["c"]["medium"], "low": lambda h: h["c"]["low"],
+    "reboot": lambda h: h["c"]["reboot"],
+    "last_seen": lambda h: h["last_seen"] or "",
+}
+HOST_PER_PAGE = (50, 100)
+HOST_SORT_GROUP = {"ip": lambda h: _ip_key(h["ip"])[0], "kernel": lambda h: _kernel_key(h)[0]}   # 分組（沒有值的）不論順序都排在後面
+HOST_SORT_DESC_FIRST = {"packages", "critical", "high", "medium", "low", "reboot", "last_seen"}    # 第一次點就由大到小
+
+
+_VKEY = functools.cmp_to_key(vercmp)
+
+
+KERNEL_VERSION = re.compile(r"([0-9]+:)?[0-9][0-9A-Za-z.+~-]*")      # fullmatch：可以有 epoch（1:…）
+
+
+def _kernel_key(h):
+    """執行中 kernel 依版本排序（6.8.0-45 在 6.8.0-100 前面）。第一個值是分組：0＝版本、1＝不是版本格式的（kernel API 欄位設錯，
+    依字串）、2＝畫面上沒有顯示版本的（過期、無資料…）；index() 不論順序都把 1、2 放在版本後面"""
+    v = h["kernel_version"]
+    if not (v and h["kernel_status"] in ("ok", "error")):
+        return (2, "")
+    return (0, _VKEY(v)) if KERNEL_VERSION.fullmatch(v) else (1, v)
+
+
+def _ip_key(ip):
+    """IP 依數值排序（10.0.0.9 在 10.0.0.10 前面）；空白或認不得的排最後"""
+    try:
+        a = ipaddress.ip_address(ip or "")
+        return (0, a.version, int(a))
+    except ValueError:
+        return (1, 0, 0)
 
 
 def _quarters(today):
@@ -319,22 +366,34 @@ def create_app(start_scheduler=True):
     @app.route("/")
     def index():
         c = g.con
-        rows = report.query_findings(c, show_excepted=False)
-        by_prio = {}
-        per_host = {}
-        cves = {}
-        for r in rows:
-            cves.setdefault((r["hostname"], r["cve"]), r)
-        for (hn, _), r in cves.items():
-            by_prio[r["priority"]] = by_prio.get(r["priority"], 0) + 1
-            ph = per_host.setdefault(hn, {"critical": 0, "high": 0, "medium": 0, "low": 0, "negligible": 0, "": 0, "reboot": False})
-            ph[r["priority"] or ""] += 1
-        for r in rows:
-            if r["location"] == "running-kernel":
-                per_host[r["hostname"]]["reboot"] = True
-        hosts = c.execute("SELECT * FROM host WHERE active=1 ORDER BY hostname").fetchall()
-        last = c.execute("SELECT * FROM sync_run ORDER BY id DESC LIMIT 5").fetchall()
-        return render_template("index.html", hosts=hosts, per_host=per_host, by_prio=by_prio, last=last)
+        empty = {"critical": 0, "high": 0, "medium": 0, "low": 0, "negligible": 0, "": 0, "reboot": False}
+        c.commit()                          # 前面（登入檢查）寫入的先送出，再開讀取交易
+        with report.read_snapshot(c):       # 數量與主機清單看同一份資料（同步可能同時在寫入）
+            per_host = report.host_overview_cached(c)
+            hosts = [dict(h, c=per_host.get(h["id"], empty)) for h in c.execute("SELECT * FROM host WHERE active=1")]
+            last = c.execute("SELECT * FROM sync_run ORDER BY id DESC LIMIT 5").fetchall()
+        by_prio = {p: sum(h["c"][p] for h in hosts) for p in ("critical", "high", "medium", "low")}
+        # 主機清單：篩選（名稱／IP、Ubuntu 版本、需重開機）、排序、分頁（每頁 50／100 台）
+        a = request.args
+        f = {"q": (a.get("q") or "").strip(), "release": a.get("release") or "", "reboot": "1" if a.get("reboot") == "1" else "",
+             "sort": a.get("sort") if a.get("sort") in HOST_SORTS else "hostname", "dir": "desc" if a.get("dir") == "desc" else "asc",
+             "per": a.get("per", type=int) if a.get("per", type=int) in HOST_PER_PAGE else HOST_PER_PAGE[0]}
+        releases = sorted({h["release"] for h in hosts if h["release"]})
+        shown = hosts
+        if f["q"]:
+            q = f["q"].lower()
+            shown = [h for h in shown if any(q in (h[k] or "").lower() for k in ("hostname", "fqdn", "ip"))]
+        if f["release"]:
+            shown = [h for h in shown if h["release"] == f["release"]]
+        if f["reboot"]:
+            shown = [h for h in shown if h["c"]["reboot"]]
+        shown.sort(key=lambda h: h["hostname"].lower())
+        shown.sort(key=HOST_SORTS[f["sort"]], reverse=f["dir"] == "desc")
+        if f["sort"] in HOST_SORT_GROUP:
+            shown.sort(key=HOST_SORT_GROUP[f["sort"]])        # 穩定排序：依分組，組內維持上面的順序
+        page_rows, page, pages = _page(shown, f["per"])
+        return render_template("index.html", desc_first=HOST_SORT_DESC_FIRST, hosts=page_rows, total_hosts=len(hosts), shown=len(shown), by_prio=by_prio,
+                               last=last, f=f, releases=releases, per_page_options=HOST_PER_PAGE, page=page, pages=pages)
 
     def _filters():
         a = request.args
@@ -574,4 +633,18 @@ def create_app(start_scheduler=True):
     if start_scheduler:
         from .scheduler import start
         start()
+        threading.Thread(target=_warm_overview, daemon=True).start()     # 啟動後第一個開總覽的人不用等
     return app
+
+
+def _warm_overview():
+    """在背景先算好總覽的數量（失敗沒關係，開總覽時會再算）"""
+    con = None
+    try:
+        con = db.connect()
+        report.host_overview_cached(con)
+    except Exception as e:
+        log.warning("總覽預先計算失敗（開總覽時會重算）：%s", e)
+    finally:
+        if con is not None:
+            con.close()

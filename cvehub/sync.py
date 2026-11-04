@@ -357,16 +357,37 @@ def run_sync(con):
 
 # ---------------------------------------------------------------- 例外
 
-def active_exceptions(con):
-    today = datetime.date.today().isoformat()
+def active_exceptions(con, today=None):
+    today = today or datetime.date.today().isoformat()
     return [e for e in con.execute("SELECT * FROM exception").fetchall() if not e["expires_at"] or e["expires_at"] >= today]
+
+
+class ExceptionMatcher:
+    """例外規則的判斷：主機名稱（hostname 或 fqdn）與 CVE 都用 fnmatch 樣式、不分大小寫，取第一條符合的。
+    規則先編譯，每台主機適用的規則只算一次
+      m = ExceptionMatcher(active_exceptions(con)); m(hostname, cve, fqdn) → 例外或 None"""
+
+    def __init__(self, exceptions):
+        self.rules = [(re.compile(fnmatch.translate(e["host_pattern"].lower())), re.compile(fnmatch.translate(e["cve"].upper())), e)
+                      for e in exceptions]
+        self.cache = {}
+
+    def for_host(self, hostname, fqdn=None):
+        """這台主機適用的規則 [(CVE 樣式, 例外)]"""
+        k = (hostname, fqdn)
+        rs = self.cache.get(k)
+        if rs is None:
+            names = [n.lower() for n in (hostname, fqdn) if n]
+            rs = self.cache[k] = [(c, e) for h, c, e in self.rules if any(h.match(n) for n in names)]
+        return rs
+
+    def __call__(self, hostname, cve, fqdn=None):
+        rs = self.for_host(hostname, fqdn) if self.rules else ()
+        cu = cve.upper()
+        return next((e for c, e in rs if c.match(cu)), None)
 
 
 def excepted(exceptions, hostname, cve, fqdn=None):
     """套用到這台主機、這個 CVE 的例外規則；主機名稱比 hostname 與 fqdn（來源回報的原樣）：
-    hostname 只存第一段時，寫成 web01.example.com、*.example.com 的規則照樣套用"""
-    names = [n.lower() for n in (hostname, fqdn) if n]
-    for e in exceptions:
-        if any(fnmatch.fnmatch(n, e["host_pattern"].lower()) for n in names) and fnmatch.fnmatch(cve.upper(), e["cve"].upper()):
-            return e
-    return None
+    hostname 只存第一段時，寫成 web01.example.com、*.example.com 的規則照樣套用。判斷都在 ExceptionMatcher（大量比對時直接用它）"""
+    return ExceptionMatcher(exceptions)(hostname, cve, fqdn)

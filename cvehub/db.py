@@ -131,9 +131,15 @@ CREATE TABLE IF NOT EXISTS finding (
     resolved_at TEXT,
     UNIQUE (host_id, cve, package, location)
 );
-CREATE INDEX IF NOT EXISTS finding_open ON finding(resolved_at, host_id);
+DROP INDEX IF EXISTS finding_open;               -- 0.9.5 起由 finding_open_cover 取代（開頭欄位相同）
+-- 總覽的彙總只讀這個索引（不必回表、已依主機×CVE 排好）；升級後第一次啟動時建立（40 萬筆約數秒）
+CREATE INDEX IF NOT EXISTS finding_open_cover ON finding(resolved_at, host_id, cve, priority, location);
 CREATE INDEX IF NOT EXISTS finding_cve ON finding(cve);
 DROP INDEX IF EXISTS host_lname;                -- 0.9.4 開發中曾建立，已不用
+
+-- 資料版本號：比對結果、主機、例外規則有會影響總覽數量的改寫就加一（觸發器在 TRIGGERS），總覽的快取依它判斷要不要重算
+-- epoch：建立時的亂數，換成另一份資料庫時靠它分辨（同一份的備份 epoch 相同：還原前要先停容器）
+CREATE TABLE IF NOT EXISTS data_gen (id INTEGER PRIMARY KEY CHECK (id = 1), gen INTEGER NOT NULL, epoch TEXT NOT NULL);
 
 -- 例外／風險接受
 CREATE TABLE IF NOT EXISTS exception (
@@ -145,6 +151,7 @@ CREATE TABLE IF NOT EXISTS exception (
     created_by TEXT,
     created_at TEXT NOT NULL
 );
+
 
 -- 帳號（角色 viewer／admin）與稽核紀錄
 CREATE TABLE IF NOT EXISTS users (
@@ -207,6 +214,27 @@ def connect(path=None):
     return con
 
 
+# data_gen 的觸發器：在舊版資料庫升級（補欄位）之後才建立（觸發器用到 host.fqdn）；定義和資料庫裡的不同時換掉（_ensure_triggers）。
+# 總覽數量用到的欄位（finding 的 host_id／cve／priority／location／resolved_at、host 的 hostname／fqdn／active、exception 全部）
+# 有增減時要一起改這裡
+TRIGGERS = {          # 名稱 → 觸發時機（內容都是把 data_gen.gen 加一）
+    # 只在總覽數量可能改變時加一：同步每次都會更新所有比對結果的 last_seen，那些不算
+    "finding_gen_i": "AFTER INSERT ON finding",
+    "finding_gen_d": "AFTER DELETE ON finding",
+    "finding_gen_u": "AFTER UPDATE OF host_id, cve, priority, location, resolved_at ON finding "
+                     "WHEN OLD.host_id IS NOT NEW.host_id OR OLD.cve IS NOT NEW.cve OR OLD.priority IS NOT NEW.priority "
+                     "OR OLD.location IS NOT NEW.location OR OLD.resolved_at IS NOT NEW.resolved_at",
+    "host_gen_i": "AFTER INSERT ON host",
+    "host_gen_d": "AFTER DELETE ON host",
+    "host_gen_u": "AFTER UPDATE OF hostname, fqdn, active ON host "
+                  "WHEN OLD.hostname IS NOT NEW.hostname OR OLD.fqdn IS NOT NEW.fqdn OR OLD.active IS NOT NEW.active",
+    "exception_gen_i": "AFTER INSERT ON exception",
+    "exception_gen_d": "AFTER DELETE ON exception",
+    "exception_gen_u": "AFTER UPDATE ON exception",
+}
+_BUMP = "BEGIN UPDATE data_gen SET gen = gen + 1 WHERE id = 1; END"
+
+
 def init(con):
     con.executescript(SCHEMA)
     # 舊版資料庫升級
@@ -224,7 +252,36 @@ def init(con):
     cols = {r[1] for r in con.execute("PRAGMA table_info(vuln)")}
     if "details" not in cols:
         con.execute("ALTER TABLE vuln ADD COLUMN details TEXT")      # 0.4.0：重新匯入 OSV 後才有內容
+    cols = {r[1] for r in con.execute("PRAGMA table_info(data_gen)")}
+    if "epoch" not in cols:                                           # 0.9.5 開發中的資料庫
+        con.execute("ALTER TABLE data_gen ADD COLUMN epoch TEXT")
+        con.execute("UPDATE data_gen SET epoch=lower(hex(randomblob(8)))")
+    con.execute("INSERT OR IGNORE INTO data_gen(id, gen, epoch) VALUES (1, 0, lower(hex(randomblob(8))))")
     con.commit()
+    _ensure_triggers(con)
+
+
+def _ensure_triggers(con):
+    """建立或換掉 data_gen 的觸發器（TRIGGERS 裡的名稱）：只有定義不同時才動，整批在同一個寫入交易裡
+    （和別的程序同時啟動、或同步正在寫入時，不會有一段時間沒有觸發器）。改名時要把舊名稱另外刪掉"""
+    want = {n: "CREATE TRIGGER %s %s %s" % (n, when, _BUMP) for n, when in TRIGGERS.items()}
+    norm = lambda q: " ".join((q or "").split())
+
+    def changed():
+        have = {r[0]: r[1] for r in con.execute("SELECT name, sql FROM sqlite_master WHERE type='trigger'")}
+        return [n for n, q in want.items() if norm(have.get(n)) != norm(q)]
+
+    if not changed():
+        return
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        for n in changed():
+            con.execute("DROP TRIGGER IF EXISTS %s" % n)
+            con.execute(want[n])
+        con.commit()
+    except BaseException:
+        con.rollback()
+        raise
 
 
 HOST_COLUMNS = ("hostname", "fqdn", "title", "ip", "release", "pro_attached", "last_seen",

@@ -1,4 +1,5 @@
 import os
+import re
 import unittest
 
 from cvehub import osv_import, sync
@@ -217,6 +218,270 @@ class PruneHistoryTest(unittest.TestCase):
         make_osv_tar(os.path.join(Config.OSV_INBOX_DIR, "o.tar.xz"), RECORDS)      # 同一份舊檔放回放檔目錄
         self.assertFalse(osv_import.check_inbox(c))
         self.assertEqual(c.execute("SELECT id FROM osv_import WHERE active=1").fetchone()[0], newer)
+
+
+class OverviewTest(unittest.TestCase):
+    """report.host_overview（總覽用，在資料庫裡彙總）和 query_findings 逐筆算的結果相同；ExceptionMatcher 和 excepted 相同"""
+
+    def setUp(self):
+        from cvehub import report
+        self.env = TempEnv(HOST_SOURCE="file").__enter__()
+        report._overview_cache = (None, None)
+        self.addCleanup(setattr, report, "_overview_cache", (None, None))
+
+    def tearDown(self):
+        self.env.__exit__()
+
+    def old(self):
+        from cvehub import report
+        rows = report.query_findings(self.env.con, show_excepted=False)
+        per, cves = {}, {}
+        for r in rows:
+            cves.setdefault((r["host_id"], r["cve"]), r)
+        for (hid, _), r in cves.items():
+            ph = per.setdefault(hid, {"critical": 0, "high": 0, "medium": 0, "low": 0, "negligible": 0, "": 0, "reboot": False})
+            ph[r["priority"] if r["priority"] in ph else ""] += 1
+        for r in rows:
+            if r["location"] == "running-kernel":
+                per[r["host_id"]]["reboot"] = True
+        return per
+
+    def test_same_as_row_by_row(self):
+        import random
+        from unittest import mock
+        from cvehub import report
+        from cvehub.config import Config
+        c = self.env.con
+        rnd = random.Random(7)
+        now = sync.now()
+        for i in range(1, 31):
+            c.execute("INSERT INTO host(id, hostname, fqdn, release, last_seen, active) VALUES (?,?,?,'24.04',?,?)",
+                      (i, "%s%02d" % (rnd.choice(["web", "db", "app"]), i), "h%02d.%s.example.com" % (i, rnd.choice(["a", "b"])), now, int(i != 30)))
+            for j in range(rnd.randint(0, 25)):
+                cve = "CVE-%d-%04d" % (rnd.choice([2023, 2024, 2025]), rnd.randint(1, 40))
+                prio = ["critical", "high", "medium", "low", "negligible", None, "untriaged"][int(cve[-2:]) % 7]
+                if rnd.random() < 0.2:      # 同一個 CVE 的列等級不同（kernel API 失敗時執行中 kernel 的列沒有更新）
+                    prio = rnd.choice(["critical", "high", "low", None])
+                c.execute("INSERT OR IGNORE INTO finding(host_id,cve,package,location,priority,status,first_seen,last_seen,resolved_at) "
+                          "VALUES (?,?,?,?,?,'fix-available',?,?,?)", (i, cve, "p%d" % rnd.randint(1, 3), rnd.choice(["installed", "running-kernel", None]),
+                                                                       prio, now, now, rnd.choice([None, None, None, now])))
+        for hp, cv, exp in [("web*", "CVE-2024-*", None), ("*.b.example.com", "CVE-2023-00[1-2]?", None), ("db1*", "*", None),
+                            ("*", "CVE-2025-0001", None), ("*", "*", "2000-01-01"), ("app*", " *", None), ("app2*", "cve-2025-00?2", None)]:
+            c.execute("INSERT INTO exception(host_pattern,cve,reason,expires_at,created_at) VALUES (?,?,'t',?,?)", (hp, cv, exp, now))
+        c.commit()
+        for minp in ("critical", "medium", "low", "negligible", ""):
+            with mock.patch.object(Config, "MIN_PRIORITY", minp):
+                self.assertEqual(report.host_overview(c), self.old(), minp)
+        c.execute("DELETE FROM exception")
+        c.commit()
+        self.assertEqual(report.host_overview(c), self.old())
+
+    def test_mixed_priority_and_reboot(self):
+        """同一台、同一個 CVE：a 套件 critical、b 套件 high 在執行中 kernel → 只算一個 critical，而且需要重開機"""
+        from cvehub import report
+        c = self.env.con
+        now = sync.now()
+        c.execute("INSERT INTO host(id, hostname, fqdn, release, last_seen, active) VALUES (1,'web01','web01','24.04',?,1)", (now,))
+        c.execute("INSERT INTO finding(host_id,cve,package,location,priority,status,first_seen,last_seen) VALUES "
+                  "(1,'CVE-1','a','installed','critical','fix-available',?,?),(1,'CVE-1','b','running-kernel','high','fix-available',?,?)",
+                  (now,) * 4)
+        c.commit()
+        want = {"critical": 1, "high": 0, "medium": 0, "low": 0, "negligible": 0, "": 0, "reboot": True}
+        self.assertEqual(report.host_overview(c), {1: want})
+        c.execute("INSERT INTO exception(host_pattern,cve,reason,created_at) VALUES ('web*','CVE-9','t',?)", (now,))   # 套用到這台、但不是這個 CVE
+        c.commit()
+        self.assertEqual(report.host_overview(c), {1: want})
+        self.assertEqual(report.host_overview(c), self.old())
+
+    def test_many_rule_groups(self):
+        """全域規則＋每台各自的規則（每台一個群組）：結果相同，每條規則只比對一次 CVE"""
+        from cvehub import report
+        c = self.env.con
+        now = sync.now()
+        for i in range(1, 41):
+            c.execute("INSERT INTO host(id, hostname, fqdn, release, last_seen, active) VALUES (?,?,?,'24.04',?,1)", (i, "h%02d" % i, "h%02d" % i, now))
+            c.execute("INSERT INTO exception(host_pattern,cve,reason,created_at) VALUES (?,?,'t',?)", ("h%02d" % i, "CVE-%d-*" % (i % 3), now))
+            for j in range(30):
+                c.execute("INSERT INTO finding(host_id,cve,package,location,priority,status,first_seen,last_seen) VALUES (?,?,'p','installed','high','x',?,?)",
+                          (i, "CVE-%d-%d" % (j % 3, j), now, now))
+        c.execute("INSERT INTO exception(host_pattern,cve,reason,created_at) VALUES ('*','CVE-1-4','t',?)", (now,))
+        c.commit()
+        self.assertEqual(report.host_overview(c), self.old())
+
+    def test_kernel_sort_key(self):
+        from cvehub import web
+        h = lambda v, st="ok": {"kernel_version": v, "kernel_status": st}
+        rows = [h("6.8.0-100.100"), h("~custom"), h("#45-Ubuntu SMP x"), h("6.8.0-45.45"), h("6.8.0-9.9", "stale"), h(None), h("x:y"), h("1:5.0-1"), h("6.8.0-1.1\n")]
+        self.assertEqual([r["kernel_version"] for r in sorted(rows, key=web._kernel_key)],
+                         ["6.8.0-45.45", "6.8.0-100.100", "1:5.0-1", "#45-Ubuntu SMP x", "6.8.0-1.1\n", "x:y", "~custom", "6.8.0-9.9", None])
+
+    def test_cache_invalidated_when_data_changes(self):
+        """快取：資料沒變時沿用；比對結果（含筆數不變的修改）、主機名稱／啟用、例外規則、MIN_PRIORITY 變了就重算"""
+        from unittest import mock
+        from cvehub import report
+        from cvehub.config import Config
+        c = self.env.con
+        now = sync.now()
+        c.execute("INSERT INTO host(id, hostname, fqdn, release, last_seen, active) VALUES (1,'web01','web01','24.04',?,1),(2,'db01','db01','24.04',?,1)", (now, now))
+        c.execute("INSERT INTO finding(host_id,cve,package,location,priority,status,first_seen,last_seen) VALUES "
+                  "(1,'CVE-1','a','installed','high','x',?,?),(2,'CVE-2','a','installed','low','x',?,?)", (now,) * 4)
+        c.commit()
+        calls = []
+        real = report.host_overview
+        with mock.patch.object(report, "host_overview", side_effect=lambda con, today=None: calls.append(1) or real(con, today)):
+            first = report.host_overview_cached(c)
+            self.assertEqual(report.host_overview_cached(c), first)           # 沒變：沿用（沒有重算）
+            self.assertEqual(len(calls), 1)
+            c.execute("INSERT INTO sync_run(started_at,status) VALUES (?,'running')", (now,))     # 和數量無關：不重算
+            c.commit()
+            report.host_overview_cached(c)
+            self.assertEqual(len(calls), 1)
+            steps = [
+                lambda: c.execute("UPDATE finding SET resolved_at=? WHERE host_id=2", (now,)),
+                lambda: c.execute("UPDATE host SET hostname='web01.example.com' WHERE id=1"),
+                lambda: c.execute("UPDATE host SET active=0 WHERE id=2"),
+                lambda: c.execute("INSERT INTO exception(host_pattern,cve,reason,created_at) VALUES ('web*','CVE-1','t',?)", (now,)),
+                lambda: c.execute("UPDATE exception SET expires_at='2000-01-01'"),       # 到期
+                lambda: c.execute("UPDATE finding SET priority='critical' WHERE host_id=1"),  # 筆數不變、等級變了（同步途中）
+                lambda: c.execute("DELETE FROM exception"),
+            ]
+            for i, step in enumerate(steps):
+                step()
+                c.commit()
+                n = len(calls)
+                self.assertEqual(report.host_overview_cached(c), real(c), i)
+                self.assertEqual(len(calls), n + 1, i)                           # 重算了
+            n = len(calls)
+            with mock.patch.object(Config, "MIN_PRIORITY", "medium"):
+                self.assertEqual(report.host_overview_cached(c), real(c))
+            self.assertEqual(len(calls), n + 1)
+        self.assertFalse(c.in_transaction)
+        got = report.host_overview_cached(c)
+        got[1]["high"] = 99                                                      # 回傳複本：改了不影響快取
+        self.assertNotEqual(report.host_overview_cached(c)[1]["high"], 99)
+
+    def test_cache_hit_needs_same_generation(self):
+        """版本號不同（較大或較小）都重算，不沿用"""
+        from cvehub import report
+        c = self.env.con
+        scope = report._overview_key(c, sync.datetime.date.today().isoformat())[0]
+        for g in (10 ** 9, -1):
+            report._overview_cache = ((scope, g), {"x": {}})
+            self.assertEqual(report.host_overview_cached(c), {})
+
+    def test_upgrade_from_dev_data_gen(self):
+        """0.9.5 開發中的資料庫：data_gen 沒有 epoch、觸發器是舊的（不分欄位）→ 補上、換成新的定義"""
+        from cvehub import db
+        c = self.env.con
+        c.executescript("DROP TABLE data_gen; CREATE TABLE data_gen (id INTEGER PRIMARY KEY CHECK (id = 1), gen INTEGER NOT NULL);"
+                        "INSERT INTO data_gen VALUES (1, 0); DROP TRIGGER finding_gen_u;"
+                        "CREATE TRIGGER finding_gen_u AFTER UPDATE ON finding BEGIN UPDATE data_gen SET gen = gen + 1 WHERE id = 1; END;")
+        c.execute("UPDATE data_gen SET gen=41")
+        c.commit()
+        db.init(c)
+        self.assertTrue(c.execute("SELECT epoch FROM data_gen").fetchone()[0])
+        self.assertEqual(self.gen(), 41)                                     # 版本號保留
+        self.assertIn("WHEN", c.execute("SELECT sql FROM sqlite_master WHERE name='finding_gen_u'").fetchone()[0])
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger'").fetchone()[0], 9)
+        c.execute("INSERT INTO exception(host_pattern,cve,reason,created_at) VALUES ('a','b','c','d')")   # 新的觸發器有作用
+        c.commit()
+        self.assertEqual(self.gen(), 42)
+        stmts = []
+        c.set_trace_callback(stmts.append)
+        db.init(c)                                                          # 定義相同：不再動觸發器
+        c.set_trace_callback(None)
+        self.assertFalse([q for q in stmts if re.match(r"\s*(DROP|CREATE) TRIGGER", q, re.I)])
+        self.assertEqual(self.gen(), 42)
+        c.execute("CREATE TRIGGER host_gen_audit AFTER UPDATE ON host BEGIN SELECT 1; END")   # 別人的觸發器：不動
+        c.commit()
+        db.init(c)
+        self.assertIsNotNone(c.execute("SELECT 1 FROM sqlite_master WHERE name='host_gen_audit'").fetchone())
+
+    def gen(self):
+        return self.env.con.execute("SELECT gen FROM data_gen").fetchone()[0]
+
+    def test_generation_only_for_changes_that_matter(self):
+        c = self.env.con
+        now = sync.now()
+        g0 = self.gen()
+        c.execute("INSERT INTO host(id, hostname, fqdn, release, last_seen, active) VALUES (1,'web01','web01','24.04',?,1)", (now,))
+        c.execute("INSERT INTO finding(host_id,cve,package,location,priority,status,first_seen,last_seen) VALUES (1,'CVE-1','a','installed','high','x',?,?)", (now, now))
+        c.commit()
+        g1 = self.gen()
+        self.assertEqual(g1, g0 + 2)
+        c.execute("UPDATE finding SET last_seen='2099-01-01', installed='1', priority='high', resolved_at=NULL")   # 每次同步都會做的：不算
+        c.execute("UPDATE host SET last_seen='2099-01-01', package_count=5, hostname='web01'")
+        c.commit()
+        self.assertEqual(self.gen(), g1)
+        for q in ("UPDATE finding SET priority='critical'", "UPDATE finding SET location='running-kernel'", "UPDATE finding SET resolved_at='x'",
+                  "UPDATE finding SET priority=NULL", "UPDATE host SET fqdn='web01.example.com'", "UPDATE host SET active=0",
+                  "INSERT INTO exception(host_pattern,cve,reason,created_at) VALUES ('a','b','c','d')", "UPDATE exception SET reason='z'",
+                  "DELETE FROM exception", "DELETE FROM finding"):
+            before = self.gen()
+            c.execute(q)
+            c.commit()
+            self.assertEqual(self.gen(), before + 1, q)
+
+    def test_uncommitted_write_not_cached(self):
+        """連線裡有還沒送出的寫入時：算出來的不寫進快取（rollback 後版本號可能再出現一次）"""
+        from cvehub import report
+        c = self.env.con
+        now = sync.now()
+        c.execute("INSERT INTO host(id, hostname, fqdn, release, last_seen, active) VALUES (1,'web01','web01','24.04',?,1)", (now,))
+        c.execute("INSERT INTO finding(host_id,cve,package,location,priority,status,first_seen,last_seen) VALUES (1,'CVE-1','a','installed','high','x',?,?)", (now, now))
+        c.commit()
+        c.execute("UPDATE finding SET priority='critical'")                   # 不送出
+        self.assertEqual(report.host_overview_cached(c)[1]["critical"], 1)
+        self.assertEqual(report._overview_cache, (None, None))
+        c.rollback()
+        c.execute("UPDATE finding SET last_seen='x', installed='y'")         # 另一個不影響數量的寫入
+        c.commit()
+        self.assertEqual(report.host_overview_cached(c)[1]["high"], 1)
+        with report.read_snapshot(c):                                         # read_snapshot 裡、沒有寫入：可以快取
+            report._overview_cache = (None, None)
+            report.host_overview_cached(c)
+        self.assertIsNotNone(report._overview_cache[0])
+
+    def test_other_database_not_mixed(self):
+        """還原成另一份資料庫（版本號相同）：epoch 不同，不會沿用"""
+        from cvehub import report
+        c = self.env.con
+        report.host_overview_cached(c)
+        k = report._overview_cache[0]
+        c.execute("UPDATE data_gen SET epoch='other'")
+        c.commit()
+        report.host_overview_cached(c)
+        self.assertNotEqual(report._overview_cache[0], k)
+        c.execute("DELETE FROM data_gen")                                    # 沒有版本號：不快取，照樣算
+        c.commit()
+        report._overview_cache = (None, None)
+        self.assertEqual(report.host_overview_cached(c), {})
+        self.assertEqual(report._overview_cache, (None, None))
+
+    def test_upgrade_from_older_database(self):
+        """0.9.4 的資料庫（有 finding_open、沒有 data_gen 與觸發器）：init 補上，觸發器有作用"""
+        from cvehub import db
+        c = self.env.con
+        c.executescript("DROP TABLE data_gen;" + "".join("DROP TRIGGER %s_gen_%s;" % (t, o) for t in ("finding", "host", "exception") for o in "idu") +
+                        "DROP INDEX finding_open_cover; CREATE INDEX finding_open ON finding(resolved_at, host_id);"
+                        "INSERT INTO host(id, hostname, release, last_seen, active) VALUES (1,'web01','24.04','x',1);")
+        db.init(c)
+        c.commit()
+        idx = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+        self.assertIn("finding_open_cover", idx)
+        self.assertNotIn("finding_open", idx)
+        g = self.gen()
+        c.execute("UPDATE host SET active=0")
+        c.commit()
+        self.assertEqual(self.gen(), g + 1)
+
+    def test_matcher_same_as_excepted(self):
+        exc = [{"host_pattern": "Web*", "cve": "cve-2024-*", "reason": "a"}, {"host_pattern": "*.example.com", "cve": "CVE-2025-00?1", "reason": "b"},
+               {"host_pattern": "db[0-9]", "cve": "*", "reason": "c"}, {"host_pattern": "x", "cve": "[!C]*", "reason": "d"}]
+        m = sync.ExceptionMatcher(exc)
+        for hn, fq in [("web01", None), ("WEB01", "web01.example.com"), ("db1", ""), ("db10", None), ("x", None), ("app", "app.example.com")]:
+            for cve in ("CVE-2024-1", "cve-2025-0011", "CVE-2025-0012", "CVE-2023-9", "X-1"):
+                self.assertEqual(m(hn, cve, fq), sync.excepted(exc, hn, cve, fq), (hn, fq, cve))
 
 
 class UpsertHostTest(unittest.TestCase):
@@ -586,6 +851,7 @@ class HostMatchKeyTest(unittest.TestCase):
     def test_upgrade_fills_fqdn(self):
         from cvehub import db
         c = self.env.con
+        c.execute("DROP TRIGGER host_gen_u")                     # 0.9.3 的資料庫沒有這個觸發器（用到 fqdn）
         c.execute("ALTER TABLE host DROP COLUMN fqdn")
         c.execute("INSERT INTO host(hostname,release,last_seen,kernel_status) VALUES ('web01.example.com','24.04','x','disabled')")
         c.commit()

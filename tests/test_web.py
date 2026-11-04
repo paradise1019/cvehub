@@ -152,6 +152,45 @@ class WebTest(unittest.TestCase):
         self.assertIn('name="hid" value="1"', body)                 # 查詢表單保留 hid，改條件後仍只看這一台
         self.assertIn("priority=high", body.split("改查全部主機")[0].rsplit("<a", 1)[1])   # 改查全部主機保留其他條件
 
+    def test_overview_host_list_filter_sort_page(self):
+        c = self.env.con
+        now = "2026-11-04T00:00:00"
+        for i in range(1, 121):         # 120 台：web001…web120，IP 10.0.0.1…；偶數台 22.04
+            c.execute("INSERT INTO host(id, hostname, fqdn, ip, release, last_seen, kernel_status, active) VALUES (?,?,?,?,?,?,'ok',1)",
+                      (i, "web%03d" % i, "web%03d.example.com" % i, "10.0.0.%d" % i, "22.04" if i % 2 == 0 else "24.04", now))
+        # web007：2 個 high（其中一個在執行中的 kernel）＋1 個 critical；web009：1 個 high
+        for hid, cve, prio, loc in [(7, "CVE-1", "high", "installed"), (7, "CVE-2", "high", "running-kernel"), (7, "CVE-3", "critical", "installed"),
+                                    (9, "CVE-1", "high", "installed")]:
+            c.execute("INSERT INTO finding(host_id,cve,package,location,priority,status,first_seen,last_seen) VALUES (?,?,'p',?,?,'fix-available',?,?)",
+                      (hid, cve, loc, prio, now, now))
+        c.commit()
+        body = lambda url: self.c.get(url).get_data(as_text=True)
+        rows = lambda b: re.findall(r'<a href="/host/\d+">(web\d+)</a>', b)
+        p = body("/")
+        self.assertEqual(len(rows(p)), 50)                                  # 預設每頁 50 台
+        self.assertIn("第 1／3 頁", p)
+        self.assertEqual(len(rows(body("/?per=100"))), 100)
+        self.assertEqual(len(rows(body("/?per=100&page=2"))), 20)
+        self.assertEqual(len(rows(body("/?per=7"))), 50)                     # 不是 50／100：用預設
+        self.assertEqual(rows(body("/?sort=high&dir=desc"))[:2], ["web007", "web009"])
+        self.assertEqual(rows(body("/?sort=critical&dir=desc"))[0], "web007")
+        self.assertEqual(rows(body("/?sort=ip&dir=asc"))[:3], ["web001", "web002", "web003"])     # IP 依數值排序
+        self.assertEqual(rows(body("/?sort=ip&dir=desc"))[0], "web120")
+        self.assertEqual(rows(body("/?reboot=1")), ["web007"])
+        self.assertEqual(rows(body("/?q=10.0.0.11")), ["web011", "web110", "web111", "web112", "web113", "web114", "web115", "web116", "web117", "web118", "web119"])
+        self.assertEqual(len(rows(body("/?release=22.04&per=100"))), 60)
+        self.assertIn("沒有符合的主機", body("/?q=nothing"))
+        c.execute("UPDATE host SET kernel_version='6.8.0-' || (id % 50) || '.1' WHERE id <= 3")
+        c.execute("UPDATE host SET kernel_version='unknown' WHERE id = 4")
+        c.commit()
+        for d in ("asc", "desc"):           # 版本在前；不是版本格式的、沒有值的不論順序都在後面
+            got = rows(body("/?sort=kernel&per=100&dir=" + d))[:5]
+            self.assertEqual(got, (["web001", "web002", "web003"] if d == "asc" else ["web003", "web002", "web001"]) + ["web004", got[4]])
+            self.assertNotIn(got[4], ("web001", "web002", "web003", "web004"))
+        self.assertEqual(self.c.get("/?sort=bogus&page=x").status_code, 200)
+        nxt = re.search(r'<a href="([^"]+)">下一頁', body("/?sort=high&dir=desc&q=web")).group(1)       # 換頁保留排序與篩選
+        self.assertTrue(all(x in nxt for x in ("sort=high", "dir=desc", "q=web", "page=2")), nxt)
+
     def test_csv_export(self):
         r = self.c.get("/findings?format=csv&view=summary", headers=self.auth)
         self.assertEqual(r.status_code, 200)
