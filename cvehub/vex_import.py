@@ -18,7 +18,7 @@ import urllib.parse
 
 from .config import Config
 from .kernel import kernel_variant
-from .util import now as _now, sha256_file as _sha256
+from .util import CONTENT_ERRORS, archive_name, prune_archive, now as _now, sha256_file as _sha256
 
 log = logging.getLogger(__name__)
 
@@ -199,20 +199,22 @@ def import_file(con, path):
 def check_inbox(con):
     """VEX 放檔目錄有新檔（sha256 沒匯入過）就匯入，之後移到保存目錄。回傳是否有新匯入"""
     files = sorted(glob.glob(os.path.join(Config.VEX_INBOX_DIR, "*.tar.xz")), key=os.path.getmtime)
-    imported = False
+    imported, bad = False, None
     for f in files:
+        failed = False
         done = con.execute("SELECT 1 FROM vex_import WHERE sha256=? AND status='ok'", (_sha256(f),)).fetchone()
         if not done:
-            import_file(con, f)
-            imported = True
+            try:
+                import_file(con, f)
+            except CONTENT_ERRORS as e:     # 內容有問題：移出放檔目錄（failed-），繼續處理後面的檔案
+                failed, bad = True, bad or e
+            else:
+                imported = True
         os.makedirs(Config.VEX_ARCHIVE_DIR, exist_ok=True)
-        name = os.path.basename(f)
-        if not (len(name) > 9 and name[:8].isdigit() and name[8] == "-"):
-            name = "%s-%s" % (datetime.date.today().strftime("%Y%m%d"), name)
-        shutil.move(f, os.path.join(Config.VEX_ARCHIVE_DIR, name))
-    keep = sorted(glob.glob(os.path.join(Config.VEX_ARCHIVE_DIR, "*.tar.xz")), key=os.path.getmtime)
-    for old in keep[:-Config.OSV_KEEP_FILES] if Config.OSV_KEEP_FILES > 0 else []:
-        os.remove(old)
+        shutil.move(f, os.path.join(Config.VEX_ARCHIVE_DIR, archive_name(f, failed)))
+    prune_archive(Config.VEX_ARCHIVE_DIR, Config.OSV_KEEP_FILES)
+    if bad:
+        raise bad
     return imported
 
 

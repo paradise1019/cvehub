@@ -31,6 +31,20 @@ def _osv_check():
         con.close()
 
 
+def download_now():
+    """下載 OSV／VEX（有新的就接著同步匯入）；排程與網頁的「立即下載」共用"""
+    from . import download
+    from .web import run_job
+    con = db.connect()
+    try:
+        out = download.fetch_all(con)
+    finally:
+        con.close()
+    if out and any(r == "new" for r, _ in out.values()) and not run_job("sync"):
+        log.info("已下載新的 OSV／VEX；同步正在執行，下一次檢查放檔目錄時匯入")
+    return out
+
+
 def _sync():
     from .web import run_job
     if not run_job("sync"):
@@ -44,5 +58,8 @@ def start():
     _sched = BackgroundScheduler(timezone=Config.TZ)
     _sched.add_job(_sync, CronTrigger.from_crontab(Config.SCHEDULE_SYNC, timezone=Config.TZ), id="sync", max_instances=1, coalesce=True)
     _sched.add_job(_osv_check, CronTrigger.from_crontab(Config.SCHEDULE_OSV_CHECK, timezone=Config.TZ), id="osv", max_instances=1, coalesce=True)
+    if Config.CVE_DATA_DOWNLOAD:
+        _sched.add_job(download_now, CronTrigger.from_crontab(Config.SCHEDULE_CVE_DATA_DOWNLOAD, timezone=Config.TZ), id="download",
+                       max_instances=1, coalesce=True)
     _sched.start()
     log.info("排程啟動：同步 [%s]，OSV 檢查 [%s]（%s）", Config.SCHEDULE_SYNC, Config.SCHEDULE_OSV_CHECK, Config.TZ)

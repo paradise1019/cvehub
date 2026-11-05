@@ -9,7 +9,7 @@ import tarfile
 
 from .config import Config
 from .kernel import kernel_variant
-from .util import now as _now, sha256_file as _sha256
+from .util import CONTENT_ERRORS, archive_name, prune_archive, now as _now, sha256_file as _sha256
 
 log = logging.getLogger(__name__)
 
@@ -179,20 +179,22 @@ def check_inbox(con):
     done = {s for s in shas.values() if con.execute("SELECT 1 FROM osv_import WHERE sha256=? AND status='ok'", (s,)).fetchone()}
     if not set(shas.values()) - done:    # 有沒匯入過的新檔就直接匯入新檔，不必先重匯舊檔
         reimport_if_outdated(con)
-    imported = False
+    imported, bad = False, None
     for f in files:
+        failed = False
         if shas[f] not in done:
-            import_file(con, f)
-            imported = True
+            try:
+                import_file(con, f)
+            except CONTENT_ERRORS as e:     # 內容有問題：移出放檔目錄（failed-），繼續處理後面的檔案，不會一直擋住新檔
+                failed, bad = True, bad or e
+            else:
+                imported = True
+                done.add(shas[f])           # 同一份有好幾個副本時只匯入一次
         os.makedirs(Config.OSV_ARCHIVE_DIR, exist_ok=True)
-        name = os.path.basename(f)
-        if not (len(name) > 9 and name[:8].isdigit() and name[8] == "-"):     # 已有日期前綴就不再加
-            name = "%s-%s" % (datetime.date.today().strftime("%Y%m%d"), name)
-        dest = os.path.join(Config.OSV_ARCHIVE_DIR, name)
-        shutil.move(f, dest)
-    keep = sorted(glob.glob(os.path.join(Config.OSV_ARCHIVE_DIR, "*.tar.xz")), key=os.path.getmtime)
-    for old in keep[:-Config.OSV_KEEP_FILES] if Config.OSV_KEEP_FILES > 0 else []:
-        os.remove(old)
+        shutil.move(f, os.path.join(Config.OSV_ARCHIVE_DIR, archive_name(f, failed)))
+    prune_archive(Config.OSV_ARCHIVE_DIR, Config.OSV_KEEP_FILES)
+    if bad:
+        raise bad
     return imported
 
 

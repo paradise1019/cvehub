@@ -2,6 +2,13 @@
 
 更新方式見 README「6. 更新、回復、備份」：解開新版 zip，`sudo bash <解開的目錄>/install.sh`。
 
+## 0.9.7
+- 自動下載 OSV／VEX（預設關閉）：`.env` 設 `CVE_DATA_DOWNLOAD=on` 後依 `SCHEDULE_CVE_DATA_DOWNLOAD`（預設每 6 小時）檢查 Canonical 的兩份檔案，用 ETag／Last-Modified 詢問，有更新才下載；下載完檢查大小與 xz／tar 格式、放進放檔目錄後自動匯入。檔案日期用 Canonical 的 Last-Modified；內容和已匯入的相同時不重複匯入
+- 只用 HTTPS（轉址到 http 也拒絕）；只給下載用的 proxy（`DOWNLOAD_PROXY`）與 CA（`DOWNLOAD_CA_FILE`）、單檔上限 `DOWNLOAD_MAX_MB`、每個檔案的時間上限 `DOWNLOAD_MAX_MINUTES`、剩餘空間不足 1 GB 不下載；同時只有一個下載（網頁排程、按鈕、指令列共用）；上次下載的那份沒有匯入（被清掉、資料庫還原）時重新下載
+- 「資料匯入」頁顯示自動下載狀態，管理員可「立即檢查並下載」；指令 `python -m cvehub.cli download`；超過 `DOWNLOAD_ALERT_HOURS` 小時沒有成功檢查時 `/healthz` 回報 `cve_download_failing`
+- 放檔目錄裡內容有問題的 OSV／VEX 檔（格式不對、筆數不足、壞掉的壓縮檔）匯入失敗後移到保存目錄、檔名加 `failed-`，繼續處理後面的檔案（之前會一直留在放檔目錄，每次同步都重試、擋住之後的新檔）；資料庫忙、磁碟滿這類錯誤照舊留在放檔目錄下次再試。保存目錄裡的 failed- 檔另外最多留 3 份，不會擠掉正常的保存檔；自動下載的檔案匯入失敗時，下次檢查會重新下載（設定改正或 Canonical 修正後自動恢復）
+- 完全離線的主機不受影響（預設關閉，照舊上傳）
+
 ## 0.9.6
 - 完全離線的主機（沒有 Python 套件來源、也不能 docker pull，只能傳檔案）可以安裝與更新：在能上網的機器執行 `scripts/make-offline.sh` 產生離線安裝包（程式＋Python 套件＋基礎 image，約 50 MB），主機上解開後執行裡面的 `install.sh`；基礎 image 自動 `docker load`，套件從程式目錄的 `wheels/` 安裝，不問套件來源（README「完全離線」）
 - 程式目錄新增 `wheels/`：裡面有套件時建置只從這裡安裝（`pip install --no-index`），沒有時和之前一樣用 `PIP_INDEX_URL`

@@ -5,6 +5,7 @@
   import-vex FILE         匯入 vex-all.tar.xz（官方處理狀態）
   import-hosts FILE       匯入主機清單 CSV 並重新比對（HOST_SOURCE=file）
   sync                    同步主機並比對（會先檢查 OSV／VEX／主機清單放檔目錄）
+  download                下載 OSV／VEX（有更新才下載，放進放檔目錄；接著執行 sync 匯入）
   report                  輸出報表到 REPORT_DIR
   period FROM TO [最低等級]
                           輸出報表（CVE 公開日期 FROM～TO，YYYY-MM-DD），輸出 Excel 到 REPORT_DIR
@@ -24,7 +25,7 @@ import sys
 
 from werkzeug.security import generate_password_hash
 
-from . import auth, db, osv_import, period, report, sync, vex_import
+from . import auth, db, download, osv_import, period, report, sync, vex_import
 from .lock import Busy, job_lock
 from .config import Config
 
@@ -91,6 +92,31 @@ def main(argv=None):
             print("注意：%s" % r["message"])
         if sync_error:
             print("比對失敗：%s" % sync_error, file=sys.stderr)
+            return 1
+    elif cmd == "download":
+        out = download.fetch_all(con)
+        if out is None:
+            print("已經有一個下載在執行", file=sys.stderr)
+            return 2
+        for kind, (res, msg) in out.items():
+            print("%s：%s" % (download.KINDS[kind][2], msg), file=sys.stderr if res == "error" else sys.stdout)
+        new = [k for k, (r, _) in out.items() if r == "new"]
+        if new:                                             # 有一份失敗也先匯入成功下載的那份
+            try:
+                with job_lock():
+                    sync.run_sync(con)
+            except Busy as e:
+                print("%s；檔案已在放檔目錄，下一次同步匯入" % e, file=sys.stderr)
+                return 2
+            except Exception as e:
+                print("同步失敗：%s" % e, file=sys.stderr)
+                out["sync"] = ("error", str(e))
+            for k in new:                                   # run_sync 不會因為匯入失敗而中止：這裡確認真的匯入了
+                sha = download.last_sha.get(k)
+                if not (sha and download._imported(con, download.KINDS[k][3], sha)):
+                    print("%s 已下載但匯入失敗，原因看網頁「資料匯入」的紀錄" % download.KINDS[k][2], file=sys.stderr)
+                    out[k] = ("error", "")
+        if any(r == "error" for r, _ in out.values()):
             return 1
     elif cmd in ("import-osv", "import-vex", "sync"):
         try:

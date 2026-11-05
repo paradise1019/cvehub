@@ -14,7 +14,7 @@ import urllib.parse
 from flask import Flask, Response, abort, g, jsonify, redirect, render_template, request, session, url_for
 from werkzeug.exceptions import NotFound
 
-from . import __version__, auth, db, impact, osv_import, period, report, sync, vex_import
+from . import __version__, auth, db, download, impact, osv_import, period, report, sync, vex_import
 from .lock import Busy, job_lock
 from .vercmp import vercmp
 from .config import PRIO, Config
@@ -570,7 +570,18 @@ def create_app(start_scheduler=True):
         rows = g.con.execute("SELECT * FROM osv_import ORDER BY id DESC LIMIT 20").fetchall()
         vex_rows = g.con.execute("SELECT * FROM vex_import ORDER BY id DESC LIMIT 20").fetchall()
         host_rows = g.con.execute("SELECT * FROM host_import ORDER BY id DESC LIMIT 20").fetchall()
-        return render_template("data.html", rows=rows, vex_rows=vex_rows, host_rows=host_rows)
+        return render_template("data.html", rows=rows, vex_rows=vex_rows, host_rows=host_rows,
+                               dl_state=download.load_state(), dl_kinds=download.KINDS, dl_failing=download.failing())
+
+    @app.route("/download", methods=["POST"])
+    def download_now():
+        """立即下載 OSV／VEX（背景執行，結果看資料匯入頁）"""
+        if not Config.CVE_DATA_DOWNLOAD:
+            abort(400)
+        from .scheduler import download_now as job
+        threading.Thread(target=job, daemon=True).start()
+        auth.audit(g.con, g.user, _ip(), "download")
+        return redirect(url_for("data"))
 
     @app.route("/sync", methods=["POST"])
     def sync_now():
@@ -609,6 +620,8 @@ def create_app(start_scheduler=True):
         bad_vex = c.execute("SELECT status FROM vex_import ORDER BY id DESC LIMIT 1").fetchone()
         if bad_vex and bad_vex["status"] == "failed":
             problems.append("last_vex_import_failed")
+        if download.failing():
+            problems.append("cve_download_failing")
         body = {"status": "ok" if not problems else "degraded", "problems": problems,
                 "osv_file_date": imp["file_mtime"] if imp else None, "vex_file_date": vex["file_mtime"] if vex else None,
                 "last_successful_sync": last_ok["finished_at"] if last_ok else None, "version": __version__}

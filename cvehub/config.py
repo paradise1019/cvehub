@@ -61,6 +61,18 @@ class Config:
     VEX_KEEP_KERNEL_VARIANTS = [p.strip() for p in _s("VEX_KEEP_KERNEL_VARIANTS").split(",") if p.strip()]
     UBUNTU_RELEASES = [r.strip() for r in _s("UBUNTU_RELEASES", "20.04,22.04,24.04").split(",") if r.strip()]
     OSV_STALE_WARN_DAYS = _i("OSV_STALE_WARN_DAYS", 7)
+    # 自動下載 OSV／VEX（download.py）：連得到外網或 proxy 才開；完全離線的主機照舊上傳
+    CVE_DATA_DOWNLOAD = _b("CVE_DATA_DOWNLOAD", False)
+    SCHEDULE_CVE_DATA_DOWNLOAD = _s("SCHEDULE_CVE_DATA_DOWNLOAD", "17 */6 * * *")
+    OSV_DOWNLOAD_URL = _s("OSV_DOWNLOAD_URL", "https://security-metadata.canonical.com/osv/osv-all.tar.xz")
+    VEX_DOWNLOAD_URL = _s("VEX_DOWNLOAD_URL", "https://security-metadata.canonical.com/vex/vex-all.tar.xz")
+    DOWNLOAD_PROXY = _s("DOWNLOAD_PROXY")
+    DOWNLOAD_CA_FILE = _s("DOWNLOAD_CA_FILE")
+    DOWNLOAD_TIMEOUT = _i("DOWNLOAD_TIMEOUT", 60)
+    DOWNLOAD_MAX_MB = _i("DOWNLOAD_MAX_MB", 500)
+    DOWNLOAD_MAX_MINUTES = _i("DOWNLOAD_MAX_MINUTES", 30)
+    DOWNLOAD_ALLOW_HTTP = _b("DOWNLOAD_ALLOW_HTTP", False)
+    DOWNLOAD_ALERT_HOURS = _i("DOWNLOAD_ALERT_HOURS", 48)
     # 匯入檢查：每個 UBUNTU_RELEASES 版本至少要有這麼多筆 affected，否則判定檔案有問題、保留舊資料
     OSV_MIN_ROWS_PER_RELEASE = _i("OSV_MIN_ROWS_PER_RELEASE", 1000)
 

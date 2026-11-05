@@ -191,6 +191,26 @@ class WebTest(unittest.TestCase):
         nxt = re.search(r'<a href="([^"]+)">下一頁', body("/?sort=high&dir=desc&q=web")).group(1)       # 換頁保留排序與篩選
         self.assertTrue(all(x in nxt for x in ("sort=high", "dir=desc", "q=web", "page=2")), nxt)
 
+    def test_download_status_and_button(self):
+        from unittest import mock
+        from cvehub import download
+        self.assertEqual(self.post("/download").status_code, 400)                      # 沒開自動下載
+        self.assertNotIn("自動下載", self.c.get("/data").get_data(as_text=True))
+        with mock.patch.object(Config, "CVE_DATA_DOWNLOAD", True), \
+                mock.patch("cvehub.scheduler.download_now") as job:
+            page = self.c.get("/data").get_data(as_text=True)
+            self.assertIn("自動下載：開啟", page)
+            self.assertIn("尚未檢查", page)
+            self.assertEqual(self.post("/download").status_code, 302)
+            for _ in range(50):
+                if job.called:
+                    break
+                time.sleep(0.05)
+            self.assertTrue(job.called)
+            download._save_state({"osv": {"first_checked_at": "2000-01-01T00:00:00", "checked_at": "2000-01-01T00:00:00", "result": "error", "message": "timeout"}})
+            self.assertIn("cve_download_failing", self.c.get("/healthz").get_json()["problems"])
+            self.assertIn("超過 48 小時", self.c.get("/data").get_data(as_text=True))
+
     def test_csv_export(self):
         r = self.c.get("/findings?format=csv&view=summary", headers=self.auth)
         self.assertEqual(r.status_code, 200)

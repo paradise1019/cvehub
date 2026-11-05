@@ -4,6 +4,14 @@
 <div class="card intro">兩份資料都來自 Canonical，<b>請一起下載、一起更新</b>：
 <b>OSV</b> 用來判斷主機要不要更新（有正確的第一個修正版本）；<b>VEX</b> 提供官方處理狀態（Needs evaluation、Vulnerable、Ignored、Not affected…），給輸出報表與受影響主機用。
 也可以把檔案直接放到容器的放檔目錄（OSV：{{ cfg.OSV_INBOX_DIR }}；VEX：{{ cfg.VEX_INBOX_DIR }}），會自動檢查。匯入完成後自動重新比對。</div>
+{% if cfg.CVE_DATA_DOWNLOAD %}<div class="card{% if dl_failing %} warn{% endif %}"><b>自動下載：開啟</b>（排程 {{ cfg.SCHEDULE_CVE_DATA_DOWNLOAD }}，有更新才下載，下載後自動匯入）
+<table style="width:auto;margin:.4rem 0"><tr><th>檔案</th><th>上次檢查</th><th>結果</th><th>上次成功</th><th>Canonical 檔案日期</th></tr>
+{% for kind, k in dl_kinds.items() %}{% set s = dl_state.get(kind, {}) %}<tr><td>{{ k[2] }}</td><td>{{ s.checked_at or '尚未檢查' }}</td>
+<td>{{ {'new':'已下載','same':'已是最新','error':'失敗'}.get(s.result, '') }}{% if s.message %}：{{ s.message }}{% endif %}</td><td>{{ s.ok_at or '' }}</td><td>{{ s.last_modified or '' }}</td></tr>{% endfor %}
+</table>{% if dl_failing %}<span>⚠️ 超過 {{ cfg.DOWNLOAD_ALERT_HOURS }} 小時沒有成功檢查：確認主機連得到 Canonical（或 .env 的 DOWNLOAD_PROXY），也可以改用下面的上傳。</span>{% endif %}
+{% if is_admin %}<form method="post" action="{{ url_for('download_now') }}" class="inline"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><button>立即檢查並下載</button></form>
+<span class="muted">（背景執行，約 1–3 分鐘；完成後重新整理本頁）</span>{% endif %}</div>
+{% endif %}
 {% if is_admin %}<div class="grid">
 <form class="card" method="post" enctype="multipart/form-data" style="text-align:left"><input type="hidden" name="kind" value="osv"><input type="hidden" name="csrf" value="{{ csrf_token() }}">
  <b>上傳 osv-all.tar.xz</b><br><span class="muted">https://security-metadata.canonical.com/osv/osv-all.tar.xz（約 50 MB，匯入約 1–3 分鐘）</span><br>

@@ -101,6 +101,14 @@ sudo bash ~/cvehub-install/cvehub-<版本>-offline/cvehub-<版本>/install.sh
 
 ✅「資料匯入」頁兩份最新一筆都是 `ok`、使用中＝是。
 
+**自動下載**（主機連得到外網或 proxy 時）：`.env` 設 `CVE_DATA_DOWNLOAD=on`，再 `cd /opt/cvehub && sudo docker compose up -d`。
+之後依 `SCHEDULE_CVE_DATA_DOWNLOAD`（預設每 6 小時）檢查 Canonical 的兩份檔案，有更新才下載（沒更新時只問一次、不傳檔案），下載完自動匯入、重新比對。
+- 要經過 proxy：`DOWNLOAD_PROXY=http://proxy.example.com:3128`（只有下載用，不影響 Landscape／kernel API）；proxy 會攔截 HTTPS 時，把它的 CA 放到 `config/`，設 `DOWNLOAD_CA_FILE=/config/proxy-ca.crt`
+- 「資料匯入」頁顯示每份的上次檢查、結果與 Canonical 的檔案日期；管理員可按「立即檢查並下載」；指令：`sudo docker compose exec cvehub python -m cvehub.cli download`
+- 超過 `DOWNLOAD_ALERT_HOURS`（預設 48）小時沒有成功檢查，`/healthz` 會回報 `cve_download_failing`
+- Canonical 沒有提供檢查碼或簽章：靠 HTTPS 憑證驗證，下載後先檢查大小與 xz／tar 格式，匯入時再檢查內容（每個版本的筆數下限）；不合格的不會取代使用中的資料
+- 完全離線的主機不要開，照上面的方式上傳
+
 ### 3.2 匯入主機清單
 1. 把 `ansible/collect-hosts.yml`（zip 裡就有）複製到 Ansible 控制端，收集（只讀取，不需要 sudo、不改任何東西）：
    ```bash
