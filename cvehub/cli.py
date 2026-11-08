@@ -25,7 +25,7 @@ import sys
 
 from werkzeug.security import generate_password_hash
 
-from . import auth, db, download, osv_import, period, report, sync, vex_import
+from . import auth, cves, db, download, osv_import, period, report, sync, vex_import
 from .lock import Busy, job_lock
 from .config import Config
 
@@ -123,8 +123,10 @@ def main(argv=None):
             with job_lock():
                 if cmd == "import-osv":
                     osv_import.import_file(con, argv[1])
+                    cves.build_status(con)
                 elif cmd == "import-vex":
                     vex_import.import_file(con, argv[1])
+                    cves.build_status(con)
                 else:
                     sync.run_sync(con)
         except Busy as e:

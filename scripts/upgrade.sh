@@ -52,7 +52,8 @@ done
 set -- "${ARGS[@]+"${ARGS[@]}"}"
 
 # 一律以 .env 為準：docker compose 內插時，殼層的同名變數（即使是空值）會蓋過 .env，這次和下次重建就會用不同的值
-for _v in WEB_HOST_PORT BASE_IMAGE PIP_INDEX_URL PIP_TRUSTED_HOST BUILD_HTTP_PROXY BUILD_HTTPS_PROXY BUILD_NO_PROXY; do
+# COMPOSE_PROJECT_NAME 會換掉專案（等於另一套），CVEHUB_IMAGE 會換掉 image 名稱：也一律以 .env 為準
+for _v in WEB_HOST_PORT BASE_IMAGE PIP_INDEX_URL PIP_TRUSTED_HOST BUILD_HTTP_PROXY BUILD_HTTPS_PROXY BUILD_NO_PROXY CVEHUB_IMAGE COMPOSE_PROJECT_NAME; do
     if [[ -v $_v ]]; then printf '%s\n' "⚠️  不使用環境變數 $_v（設定請改 .env）"; unset "$_v"; fi
 done
 
@@ -92,6 +93,63 @@ if [[ -z "${CVEHUB_UPGRADE_LOCKED:-}" ]]; then
     flock -n 9 || die "另一個更新或回復正在執行（看 $LOG）"
 fi
 logf "===== upgrade.sh $* ====="
+
+# ---- 同一台主機有好幾套 cvehub ----
+# Docker Compose 的專案名稱（預設＝安裝目錄的最後一段；規則同 compose：小寫、只留 a-z 0-9 _ -、去掉開頭的 _ -）
+norm_project() { printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -cd 'a-z0-9_-' | sed 's/^[_-]*//'; }
+project_name() {   # 問 docker compose（含 .env 的 COMPOSE_PROJECT_NAME）；compose 檔不在或壞掉（中斷的更新）時用 .env／目錄名稱推算
+    local n=""
+    if [[ -f "$APP_DIR/docker-compose.yml" ]]; then
+        n="$( (docker compose config --format json 2>/dev/null || true) | python3 -c 'import json, sys
+try:
+    print(json.load(sys.stdin).get("name") or "", end="")
+except Exception:
+    pass' )"
+    fi
+    [[ -n "$n" ]] || n="$(norm_project "$(sed -nE 's/^[[:space:]]*(export[[:space:]]+)?COMPOSE_PROJECT_NAME=["'"'"']?([^"'"'"' #]*).*/\2/p' "$APP_DIR/.env" | tail -1)")"
+    [[ -n "$n" ]] || n="$(norm_project "$(basename "$APP_DIR")")"
+    printf '%s' "$n"
+}
+other_instance() {   # 專案名稱是 $1、但在別的目錄的容器：印出那些目錄
+    local me d
+    me="$(realpath -m -- "$APP_DIR")"
+    while IFS= read -r d; do
+        if [[ -n "$d" && "$(realpath -m -- "$d")" != "$me" ]]; then printf '%s\n' "$d"; fi
+    done < <(docker ps -a --filter "label=com.docker.compose.project=$1" --format '{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null | sort -u)
+}
+image_repo_for() {   # 專案名稱 → 這一套的 image 名稱：cvehub（預設的 /opt/cvehub）、cvehub-test（/opt/cvehub-test）、cvehub-<名稱>（其他）
+    local s
+    s="$(printf '%s' "$1" | LC_ALL=C tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//')"
+    case "$s" in ""|cvehub) echo cvehub ;; cvehub*) echo "$s" ;; *) echo "cvehub-$s" ;; esac
+}
+# 別套的容器在用 image $1（$2＝自己的專案名稱）：印出那些目錄。自己目錄的容器（例如改過 COMPOSE_PROJECT_NAME 留下的舊容器）不算
+# 用建立容器時寫的名稱（Config.Image）：tag 被改指到別的 image 之後，docker ps 只顯示 ID
+image_users() {
+    local me i p d
+    me="$(realpath -m -- "$APP_DIR")"
+    while IFS='|' read -r i p d; do
+        [[ "$i" == "$1" && "$p" != "$2" ]] || continue
+        if [[ -n "$d" && "$(realpath -m -- "$d")" == "$me" ]]; then continue; fi
+        printf '%s\n' "${d:-不是 docker compose 建的容器}"
+    done < <(docker ps -aq 2>/dev/null | xargs -r docker inspect --format \
+        '{{.Config.Image}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.project.working_dir"}}' 2>/dev/null | sort -u)
+}
+planned_image() {   # $1＝要用的 docker-compose.yml（新版、或備份裡的舊版）：配上這個安裝目錄的 .env 與 override 會用的 image 名稱
+    # 只認 docker-compose.override.yml；.env 設了 COMPOSE_FILE、或用別的 override 檔名時算不準，回傳空字串（改由動手後的檢查處理）
+    local f=(-f "$1") o
+    grep -qE '^[[:space:]]*(export[[:space:]]+)?COMPOSE_FILE=' "$APP_DIR/.env" && return 0
+    for o in docker-compose.override.yaml compose.override.yml compose.override.yaml; do [[ -e "$APP_DIR/$o" ]] && return 0; done
+    [[ -f "$APP_DIR/docker-compose.override.yml" ]] && f+=(-f "$APP_DIR/docker-compose.override.yml")
+    (cd "$APP_DIR" && env ${IMAGE_FROM_PROJECT:+CVEHUB_IMAGE="$IMAGE_FROM_PROJECT"} \
+        docker compose --project-directory "$APP_DIR" -p "$PROJECT" "${f[@]}" config --images cvehub 2>/dev/null | head -1) || true
+}
+PROJECT="$(project_name)"
+_others="$(other_instance "$PROJECT")"
+[[ -z "$_others" ]] || die "這台主機另一套 cvehub（$(printf '%s' "$_others" | tr '\n' ' ')）的 Docker 專案名稱也是「$PROJECT」：
+   docker compose 會把兩套當成同一套（重建、停止對方的容器），不能安全地更新或回復。
+   請先把其中一套改用別的專案名稱：到那個目錄 sudo docker compose down，在它的 .env 加 COMPOSE_PROJECT_NAME=<別的名稱>
+   （例：cvehub-test）後 sudo docker compose up -d，另一套的目錄也 sudo docker compose up -d；那一套已經不用、只剩容器的話：
+   sudo docker ps -a --filter label=com.docker.compose.project=$PROJECT 找出來刪掉）。目前沒有做任何變更"
 
 
 confirm() {
@@ -174,7 +232,7 @@ on_err() {
     # 先處理、後印訊息：SSH 斷線或 pipe 已關時，印訊息可能失敗
     if [[ "$PHASE" == backup && -n "$ACTIVE_BK" ]]; then
         # 程式還沒換、容器沒動：只要清掉做到一半的備份（不完整的 code.tgz 不能留給 --rollback 用）
-        docker rmi "$(rollback_tag "$ACTIVE_BK")" >/dev/null 2>&1 || true
+        docker rmi "$(backup_ref "$ACTIVE_BK")" >/dev/null 2>&1 || true
         [[ "$ACTIVE_BK" == "$APP_DIR"/backups/?* ]] && rm -rf -- "$ACTIVE_BK"
         PHASE=""
         say "❌ 備份程式時失敗或被中斷（第 $1 行），已清掉做到一半的備份，沒有做任何變更"
@@ -218,7 +276,7 @@ stop_all() {   # 停掉這個安裝目錄的所有 cvehub 容器（含 docker co
 }
 
 drop_backup() {
-    docker rmi "$(rollback_tag "$1")" >/dev/null 2>&1 || true
+    docker rmi "$(backup_ref "$1")" >/dev/null 2>&1 || true
     if [[ "$1" == "$APP_DIR"/backups/?* && -f "$1/code.tgz" && ! -f "$1/db.ok" ]]; then
         rm -rf -- "$1"
     fi
@@ -252,8 +310,14 @@ abort_code() {   # 換程式後、測試完成前失敗：指回 tag、還原程
     die "$1；自動還原程式也失敗（磁碟滿？）。處理後執行：$(rollback_hint "$ACTIVE_BK")"
 }
 
-rollback_tag() {   # 保留更新前 image 用的 tag（docker tag 只接受 A-Z a-z 0-9 _ . -）
-    echo "cvehub-rollback:$(basename "$1" | tr -c 'A-Za-z0-9_.\n-' '_')"
+rollback_tag() {   # 保留更新前 image 用的 tag（docker tag 只接受 A-Z a-z 0-9 _ . -）；每一套各用各的名稱（預設的 /opt/cvehub 和 0.9.8 以前相同）
+    local r
+    r="$(image_repo_for "$PROJECT")"
+    echo "${r/#cvehub/cvehub-rollback}:$(basename "$1" | tr -c 'A-Za-z0-9_.\n-' '_')"
+}
+
+backup_ref() {   # 備份保留的 image tag：寫在 image_ref 的為準（舊版腳本的備份），還沒寫（備份做到一半）時用 rollback_tag
+    if [[ -f "$1/image_ref" ]]; then cat -- "$1/image_ref"; else rollback_tag "$1"; fi
 }
 
 compose_image() {   # 實際會用的 image 名稱（含 docker-compose.override.yml 的覆寫）
@@ -323,11 +387,38 @@ prune_backups() {   # 只保留最近 KEEP_BACKUPS 份（每份含資料庫，�
     # shellcheck disable=SC2012  # 備份目錄名稱是這支腳本產生的「時間-版本」，沒有特殊字元；要保留結尾的 /（下一行的檢查依賴它）
     ls -1d "$APP_DIR"/backups/*/ 2>/dev/null | sort | head -n -"$KEEP_BACKUPS" | while read -r old; do
         if [[ "$old" == "$APP_DIR"/backups/?*/ ]]; then
+            local ref
+            ref="$(backup_ref "$old")"
             rm -rf -- "$old"
-            docker rmi "$(rollback_tag "$old")" >/dev/null 2>&1 || true
+            docker rmi "$ref" >/dev/null 2>&1 || true
             out "   已刪除舊備份：$(basename "$old")"
         fi
     done || true
+}
+
+# 瀏覽器（Chrome、Edge、Firefox）不讓網頁連的 port（Fetch 規格的 bad ports）
+UNSAFE_PORTS=" 1 7 9 11 13 15 17 19 20 21 22 23 25 37 42 43 53 69 77 79 87 95 101 102 103 104 109 110 111 113 115 117 119 123 135 137 139 143 161 179 389 427 465 512 513 514 515 526 530 531 532 540 548 554 556 563 587 601 636 989 990 993 995 1719 1720 1723 2049 3659 4045 4190 5060 5061 6000 6566 6665 6666 6667 6668 6669 6679 6697 10080 "
+warn_unsafe_port() {   # 更新不擋（可能只給 curl／監控用），只提醒
+    local p
+    p="$(sed -nE 's/^[[:space:]]*(export[[:space:]]+)?WEB_HOST_PORT=["'"'"']?([^"'"'"' #]*).*/\2/p' "$APP_DIR/.env" | tail -1)"
+    p="${p:-${HOST_PORT_FROM_OLD:-8080}}"
+    [[ "$p" == \[* || "$p" == 127.*:* || ! "${p##*:}" =~ ^[0-9]+$ ]] && return 0
+    if [[ "$UNSAFE_PORTS" == *" $((10#${p##*:})) "* ]]; then
+        out "⚠️  網頁的 port ${p##*:} 會被瀏覽器拒絕連線（Chrome、Edge 顯示 ERR_UNSAFE_PORT）；建議改 .env 的 WEB_HOST_PORT（例：8081）後 sudo docker compose up -d"
+    fi
+}
+
+IMAGE_FROM_PROJECT=""
+check_image_name() {   # 0.9.9 起每一套各用各的 image 名稱（CVEHUB_IMAGE）。.env 沒寫、又不是預設的 /opt/cvehub 時依安裝目錄設定
+    grep -qE '^[[:space:]]*(export[[:space:]]+)?CVEHUB_IMAGE=' "$APP_DIR/.env" && return 0
+    [[ "$(image_repo_for "$PROJECT")" == cvehub ]] && return 0
+    IMAGE_FROM_PROJECT="$(image_repo_for "$PROJECT")"
+    out "ℹ️  這一套的 image 名稱會改成 $IMAGE_FROM_PROJECT:<版本>（寫進 .env 的 CVEHUB_IMAGE；同一台的其他 cvehub 不會再共用 image）"
+}
+
+migrate_image_name() {   # 換程式前寫進 .env（check_image_name 已決定）；舊版的 docker-compose.yml 不讀它，更新失敗還原後也沒有影響
+    [[ -n "$IMAGE_FROM_PROJECT" ]] || return 0
+    printf '\n# 這一套的 image 名稱（更新時依安裝目錄自動設定）\nCVEHUB_IMAGE=%s\n' "$IMAGE_FROM_PROJECT" >> "$APP_DIR/.env"
 }
 
 HOST_PORT_FROM_OLD=""
@@ -394,6 +485,13 @@ upgrade() {
         out "-----------------------------------------"
     fi
     check_host_port
+    warn_unsafe_port
+    check_image_name
+    local pimg pusers
+    pimg="$(planned_image "$src/docker-compose.yml")"
+    pusers="$([[ -z "$pimg" ]] || image_users "$pimg" "$PROJECT")"
+    [[ -z "$pusers" ]] || die "另一套 cvehub（$(printf '%s' "$pusers" | tr '\n' ' ')）也使用 image $pimg，建置會改到它用的 image。
+   請在 .env 設定 CVEHUB_IMAGE=<別的名稱>（例：$(image_repo_for "$PROJECT")-2）後再更新。目前沒有做任何變更"
     confirm "開始更新？（約 5–10 分鐘；中間會停機約 1 分鐘）"
 
     ts="$(date +%Y%m%d-%H%M%S)"
@@ -429,6 +527,7 @@ upgrade() {
 
     info "2/6 替換程式檔（.env、data/、config/ 不動）"
     migrate_host_port
+    migrate_image_name
     remove_code
     local it
     for it in "${CODE_ITEMS[@]}"; do
@@ -461,6 +560,15 @@ upgrade() {
         info "本機沒有基礎 image「$base」，嘗試 docker pull（主機不能連外時會失敗，請改用 docker load 或離線安裝包）"
         docker pull "$base" >/dev/null 2>&1 \
             || abort_code "拿不到基礎 image「$base」（.env 的 BASE_IMAGE）。請先載入：sudo docker load -i <檔案>（做法見 README 步驟 3）"
+    fi
+
+    local img users
+    img="$(compose_image || true)"
+    [[ -n "$img" ]] || abort_code "無法解析新版的 docker compose 設定（image 名稱）"
+    users="$(image_users "$img" "$PROJECT")"
+    if [[ -n "$users" ]]; then        # 更新前已經檢查過（planned_image）；這裡是保險
+        abort_code "另一套 cvehub（$(printf '%s' "$users" | tr '\n' ' ')）也使用 image $img，建置會改到它用的 image。
+   請在 .env 設定 CVEHUB_IMAGE=<別的名稱>（例：$(image_repo_for "$PROJECT")-2）後再更新"
     fi
 
     info "3/6 建立新版 image、跑自動化測試（舊版容器仍在運作）"
@@ -521,6 +629,17 @@ sys.exit(0 if c.execute("pragma quick_check").fetchone()[0] == "ok" else 1)' "$b
         out "ℹ️  這份備份沒有完整的資料庫備份（更新在備份資料庫時就停了），不還原資料庫。"
         out "    如果之後曾手動啟動過新版，資料庫可能已被新版改過，請先確認再回復"
     fi
+    # 回復成 0.9.8 以前的版本：image 名稱寫死在舊的 docker-compose.yml，可能和另一套相同（回復會把那個名稱指到這一套的 image）
+    local oc oimg="" ousers
+    oc="$(mktemp -d)"
+    TMP_DIRS+=("$oc")
+    if tar -xzOf "$bk/code.tgz" ./docker-compose.yml > "$oc/docker-compose.yml" 2>/dev/null; then
+        oimg="$(IMAGE_FROM_PROJECT="" planned_image "$oc/docker-compose.yml")"
+        ousers="$([[ -z "$oimg" ]] || image_users "$oimg" "$PROJECT")"
+        if [[ -n "$ousers" ]]; then
+            out "⚠️  另一套 cvehub（$(printf '%s' "$ousers" | tr '\n' ' ')）也使用 image $oimg（舊版的 image 名稱是共用的）：回復會把這個名稱指到這一套的 image，那一套下次重建容器時也會用它（版本相同通常沒有問題）"
+        fi
+    fi
     confirm "確定回復？"
     rm -f -- "$bk"/*.part                # 不完整的副本：判斷已做完，刪掉騰出空間
     ACTIVE_BK="$bk"
@@ -542,6 +661,12 @@ sys.exit(0 if c.execute("pragma quick_check").fetchone()[0] == "ok" else 1)' "$b
     # 更新前容器用的 image 通常還在：用它（不必重建；回復時 Nexus 或基礎 image 不一定拿得到）
     local img ref="" fp_img="" fp_code
     img="$(compose_image || true)"
+    if [[ -z "${oimg:-}" && -n "$img" ]]; then        # 確認前算不出舊版的 image 名稱（COMPOSE_FILE 等）：用實際設定再看一次
+        ousers="$(image_users "$img" "$PROJECT")"
+        if [[ -n "$ousers" ]]; then
+            out "⚠️  另一套 cvehub（$(printf '%s' "$ousers" | tr '\n' ' ')）也使用 image $img：回復後那一套下次重建容器時也會用這份 image"
+        fi
+    fi
     if [[ -f "$bk/image_ref" ]]; then
         ref="$(cat "$bk/image_ref")"
     fi

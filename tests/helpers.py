@@ -33,7 +33,7 @@ class TempEnv:
                 "LANDSCAPE_QUERY": "", "HOST_MATCH_KEY": "shortname", "HOST_MATCH_CASE_INSENSITIVE": True,
                 "CVE_DATA_DOWNLOAD": False, "DOWNLOAD_PROXY": "", "DOWNLOAD_CA_FILE": "", "DOWNLOAD_ALLOW_HTTP": False,
                 "WEB_TLS_CERT": "", "WEB_SECRET_KEY": "", "WEB_COOKIE_SECURE": False,
-                "WEB_HOST_PORT": "8080", "WEB_COOKIE_NAME": ""}
+                "WEB_HOST_PORT": "8080", "WEB_COOKIE_NAME": "", "SITE_LABEL": "", "SITE_COLOR": ""}
         base.update(self.overrides)
         for k, v in base.items():
             self.saved[k] = getattr(Config, k)

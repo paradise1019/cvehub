@@ -92,6 +92,23 @@ class WebTest(unittest.TestCase):
         finally:
             Config.WEB_HOST_PORT, Config.WEB_COOKIE_NAME = saved
 
+    def test_site_label(self):
+        """同一台主機有兩套時用 SITE_LABEL 分辨：每一頁（含登入頁）最上方與分頁標題；顏色只接受名稱或 #rrggbb"""
+        page = self.c.get("/").get_data(as_text=True)
+        self.assertNotIn('class="site"', page)                         # 沒設：和之前一樣
+        Config.SITE_LABEL, Config.SITE_COLOR = "測試<b>", "green"
+        page = self.c.get("/").get_data(as_text=True)
+        self.assertIn('<div class="site" style="background:#1a7f37">測試&lt;b&gt;</div>', page)
+        self.assertIn("<title>【測試&lt;b&gt;】", page)
+        for bad in ("red;}body{display:none", "#12345", "#gggggg", "url(x)"):
+            Config.SITE_COLOR = bad
+            self.assertIn('style="background:#bc4c00"', self.c.get("/").get_data(as_text=True))   # 不認得：orange
+        Config.SITE_COLOR = "#ABCDEF"
+        self.assertIn('style="background:#abcdef"', self.c.get("/").get_data(as_text=True))
+        anon = self.app.test_client().get("/login").get_data(as_text=True)
+        self.assertIn('<div class="site" style="background:#abcdef">測試&lt;b&gt;</div>', anon)
+        self.assertIn("cvehub 登入（測試&lt;b&gt;）", anon)
+
     def test_requires_login(self):
         anon = self.app.test_client()
         r = anon.get("/period?from=2026-01-01&to=2026-01-31")
@@ -210,6 +227,22 @@ class WebTest(unittest.TestCase):
             download._save_state({"osv": {"first_checked_at": "2000-01-01T00:00:00", "checked_at": "2000-01-01T00:00:00", "result": "error", "message": "timeout"}})
             self.assertIn("cve_download_failing", self.c.get("/healthz").get_json()["problems"])
             self.assertIn("超過 48 小時", self.c.get("/data").get_data(as_text=True))
+
+    def test_cves_page(self):
+        body = lambda u: self.c.get(u).get_data(as_text=True)
+        page = body("/cves")
+        self.assertIn("歷年弱點", page)
+        self.assertIn('class="tabs"', page)
+        r = self.c.get("/cves?q=cve-2026-0001")
+        self.assertEqual((r.status_code, r.headers["Location"].endswith("/cve/CVE-2026-0001")), (302, True))   # 完整編號直接到 CVE 頁
+        page = body("/cves?q=CVE-2026-109518")
+        self.assertIn("還沒有收錄 CVE-2026-109518", page)
+        self.assertIn("https://ubuntu.com/security/CVE-2026-109518", page)
+        self.assertIn("還沒有收錄", body("/cve/CVE-2026-109518"))
+        self.assertNotIn("還沒有收錄", body("/cve/CVE-2026-0001"))
+        for u in ("/cves?year=abc&priority=x&release=9&status=y&page=z", "/cves?installed=1&package=openssl&status=open"):
+            self.assertEqual(self.c.get(u).status_code, 200)
+        self.assertIn('href="/cves"', body("/"))                                     # 導覽列
 
     def test_csv_export(self):
         r = self.c.get("/findings?format=csv&view=summary", headers=self.auth)

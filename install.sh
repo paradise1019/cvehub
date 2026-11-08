@@ -111,6 +111,69 @@ valid_port() {
     ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -qxF "$ip"
 }
 
+# 瀏覽器（Chrome、Edge、Firefox）不讓網頁連的 port（Fetch 規格的 bad ports）：連過去只會看到 ERR_UNSAFE_PORT／此網址受到限制
+UNSAFE_PORTS=" 1 7 9 11 13 15 17 19 20 21 22 23 25 37 42 43 53 69 77 79 87 95 101 102 103 104 109 110 111 113 115 117 119 123 135 137 139 143 161 179 389 427 465 512 513 514 515 526 530 531 532 540 548 554 556 563 587 601 636 989 990 993 995 1719 1720 1723 2049 3659 4045 4190 5060 5061 6000 6566 6665 6666 6667 6668 6669 6679 6697 10080 "
+unsafe_port() {   # $1＝WEB_HOST_PORT；只聽 127.x（給本機反向代理連）時瀏覽器不會直接連，不算
+    [[ "$1" == \[* || "$1" == 127.*:* ]] && return 1
+    [[ "$UNSAFE_PORTS" == *" $((10#${1##*:})) "* ]]
+}
+
+# Docker Compose 的專案名稱：預設是安裝目錄的最後一段（和 compose 相同的規則：小寫、只留 a-z 0-9 _ -、去掉開頭的 _ -）
+# 兩套的目錄最後一段相同（/opt/cvehub 與 /srv/cvehub）時專案名稱相同，docker compose 會把對方的容器當成自己的（重建、停止）
+norm_project() { printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -cd 'a-z0-9_-' | sed 's/^[_-]*//'; }
+compose_project() {   # 在安裝目錄問 docker compose（含 .env 的 COMPOSE_PROJECT_NAME）；問不到時用目錄名稱推算
+    local n
+    n="$( (docker compose config --format json 2>/dev/null || true) | python3 -c 'import json, sys
+try:
+    print(json.load(sys.stdin).get("name") or "", end="")
+except Exception:
+    pass' )"
+    if [[ -n "$n" ]]; then printf '%s' "$n"; else norm_project "$(basename "$APP_DIR")"; fi
+}
+other_instance() {   # 專案名稱是 $1、但在別的目錄的容器：印出那些目錄
+    local me d
+    me="$(realpath -m -- "$APP_DIR")"
+    while IFS= read -r d; do
+        if [[ -n "$d" && "$(realpath -m -- "$d")" != "$me" ]]; then printf '%s\n' "$d"; fi
+    done < <(docker ps -a --filter "label=com.docker.compose.project=$1" --format '{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null | sort -u)
+}
+check_project() {   # $1＝專案名稱，$2＝要怎麼處理的說明
+    local others
+    others="$(other_instance "$1")"
+    [[ -z "$others" ]] || die "這台主機已經有另一套 cvehub 使用相同的 Docker 專案名稱「$1」（$(printf '%s' "$others" | tr '\n' ' ')）。
+   安裝目錄的最後一段相同時（例如 /opt/cvehub 與 /srv/cvehub），docker compose 會把兩套當成同一套、互相重建或停止對方的容器。
+   $2
+   （那一套已經不用、只剩容器的話：sudo docker ps -a --filter label=com.docker.compose.project=$1 找出來刪掉）"
+}
+# 這一套的 image 名稱（不含版本）：同一台的每一套各用各的，重新建置、更新失敗還原時不會改到別套用的 image
+image_repo_for() {   # 專案名稱 → cvehub（預設的 /opt/cvehub）、cvehub-test（/opt/cvehub-test）、cvehub-<名稱>（其他）
+    local s
+    s="$(printf '%s' "$1" | LC_ALL=C tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//')"
+    case "$s" in ""|cvehub) echo cvehub ;; cvehub*) echo "$s" ;; *) echo "cvehub-$s" ;; esac
+}
+# 別套的容器在用 image $1（$2＝自己的專案名稱）：印出那些目錄。自己目錄的容器（例如改過 COMPOSE_PROJECT_NAME 留下的舊容器）不算
+# 用建立容器時寫的名稱（Config.Image）：tag 被改指到別的 image 之後，docker ps 只顯示 ID
+image_users() {
+    local me i p d
+    me="$(realpath -m -- "$APP_DIR")"
+    while IFS='|' read -r i p d; do
+        [[ "$i" == "$1" && "$p" != "$2" ]] || continue
+        if [[ -n "$d" && "$(realpath -m -- "$d")" == "$me" ]]; then continue; fi
+        printf '%s\n' "${d:-不是 docker compose 建的容器}"
+    done < <(docker ps -aq 2>/dev/null | xargs -r docker inspect --format \
+        '{{.Config.Image}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.project.working_dir"}}' 2>/dev/null | sort -u)
+}
+check_image() {   # .env 寫好之後：專案名稱以 docker compose 為準再檢查一次，image 名稱不能和別套相同
+    local img users
+    PROJECT="$(compose_project)"
+    check_project "$PROJECT" "請在 $APP_DIR/.env 加一行 COMPOSE_PROJECT_NAME=<別的名稱>（例：cvehub-test），或刪除 $APP_DIR 改裝到別的目錄（sudo CVEHUB_DIR=/opt/cvehub-test bash $0）"
+    img="$(docker compose config --images cvehub 2>/dev/null | head -1 || true)"
+    [[ -n "$img" ]] || die "無法解析 $APP_DIR 的 docker compose 設定；修正後重新執行：$RERUN"
+    users="$(image_users "$img" "$PROJECT")"
+    [[ -z "$users" ]] || die "另一套 cvehub（$(printf '%s' "$users" | tr '\n' ' ')）也使用 image $img，重新建置會改到它用的 image。
+   請把 $APP_DIR/.env 的 CVEHUB_IMAGE 改成別的名稱（例：CVEHUB_IMAGE=$(image_repo_for "$PROJECT")-2）後重新執行：$RERUN"
+}
+
 # 安裝目錄裡屬於使用者的設定、資料與安裝狀態：複製程式、打包更新檔時都不碰（只有這一份清單）
 KEEP_EXCLUDES=(.env .env.new .install-incomplete data config backups docker-compose.override.yml)
 
@@ -122,6 +185,10 @@ copy_code() {
 }
 
 [[ $EUID -eq 0 ]] || die "請用 sudo 執行：sudo bash $0"
+# docker compose 內插時殼層的變數會蓋過 .env：專案名稱一律以安裝目錄（或 .env）為準，之後手動執行 docker compose 才會是同一套
+for _v in COMPOSE_PROJECT_NAME CVEHUB_IMAGE; do
+    if [[ -v $_v ]]; then say "⚠️  不使用環境變數 $_v（要自訂請寫在 .env）"; unset "$_v"; fi
+done
 [[ -f "$SRC/docker-compose.yml" && -f "$SRC/cvehub/__init__.py" ]] || die "$SRC 不是 cvehub 的程式目錄"
 command -v python3 >/dev/null || die "需要 python3（Ubuntu 內建）"
 command -v docker >/dev/null || die "需要 Docker：sudo apt install docker.io docker-compose-v2"
@@ -185,6 +252,13 @@ if [[ -f "$APP_DIR/.env" && -e "$INCOMPLETE" ]]; then
     HOST_SOURCE="$(get_env HOST_SOURCE)"
     WEB_HOST_PORT="$(get_env WEB_HOST_PORT)"; WEB_HOST_PORT="${WEB_HOST_PORT:-8080}"
     [[ "$WEB_HOST_PORT" == \[* ]] || valid_port "$WEB_HOST_PORT" || die ".env 的 WEB_HOST_PORT 不正確：$WEB_HOST_PORT（例：8081、127.0.0.1:8081）；修正後重新執行：$RERUN"
+    unsafe_port "$WEB_HOST_PORT" && die ".env 的 WEB_HOST_PORT（${WEB_HOST_PORT##*:}）會被瀏覽器拒絕連線（Chrome、Edge 顯示 ERR_UNSAFE_PORT）；改成別的 port（例：8081）後重新執行：$RERUN"
+    PROJECT="$(compose_project)"
+    check_project "$PROJECT" "請先處理再重新執行：在 $APP_DIR/.env 加一行 COMPOSE_PROJECT_NAME=<別的名稱>（例：cvehub-test），或刪除 $APP_DIR 改裝到別的目錄（sudo CVEHUB_DIR=/opt/cvehub-test bash $0）"
+    if [[ -z "$(get_env CVEHUB_IMAGE)" ]]; then           # 0.9.8 以前寫的 .env 沒有：依專案名稱決定
+        ENV_FILE="$APP_DIR/.env"
+        set_env CVEHUB_IMAGE "$(image_repo_for "$PROJECT")"
+    fi
     mkdir -p config data
     chown -R 10001 data
 else
@@ -193,6 +267,15 @@ else
     if [[ -d "$APP_DIR" ]] && [[ -n "$(ls -A "$APP_DIR" 2>/dev/null)" ]] && [[ "$SRC" != "$APP_DIR" ]] \
             && [[ ! -f "$APP_DIR/cvehub/__init__.py" ]]; then
         die "$APP_DIR 已存在且不是空的（也不是 cvehub 安裝目錄）；請換目錄：sudo CVEHUB_DIR=/其他/路徑 bash $0"
+    fi
+    PROJECT="$(norm_project "$(basename "$APP_DIR")")"
+    [[ -n "$PROJECT" ]] || die "安裝目錄的名稱 $(basename "$APP_DIR") 不能當 Docker 專案名稱（要有英文字母或數字）；請換目錄：sudo CVEHUB_DIR=/opt/cvehub-test bash $0"
+    check_project "$PROJECT" "請換一個目錄名稱，例：sudo CVEHUB_DIR=/opt/cvehub-test bash $0（目前沒有做任何變更）"
+    users="$(image_users "$(image_repo_for "$PROJECT"):$VERSION" "$PROJECT")"
+    [[ -z "$users" ]] || die "另一套 cvehub（$(printf '%s' "$users" | tr '\n' ' ')）已經使用 image $(image_repo_for "$PROJECT"):$VERSION（依安裝目錄名稱決定）。
+   請換一個目錄名稱，例：sudo CVEHUB_DIR=/opt/cvehub-test2 bash $0（目前沒有做任何變更）"
+    if [[ -n "$(docker ps -aq --filter label=com.docker.compose.service=cvehub 2>/dev/null || true)" ]]; then
+        say "   這台主機已經有其他 cvehub：建議設定「網站標示」（例：測試），畫面上才分得出是哪一套"
     fi
 
     step "1/7 設定（直接按 Enter 用括號內的預設值）"
@@ -208,14 +291,17 @@ else
         fi
         if ! valid_port "$WEB_HOST_PORT"; then
             say "   ❌ 格式不對，或 IP 不是這台主機的：$WEB_HOST_PORT（例：8081、127.0.0.1:8081）"
+        elif unsafe_port "$WEB_HOST_PORT"; then
+            say "   ❌ port ${WEB_HOST_PORT##*:} 會被瀏覽器拒絕連線（Chrome、Edge 顯示 ERR_UNSAFE_PORT，Firefox 顯示「此網址受到限制」），請換一個，例：8081"
         elif port_busy "$WEB_HOST_PORT"; then
             say "   ❌ port ${WEB_HOST_PORT##*:} 已經被其他程式使用（sudo ss -ltnp 'sport = :${WEB_HOST_PORT##*:}' 可以看是誰），請換一個"
         else
             break
         fi
-        [[ $YES == 1 ]] && die "請用環境變數指定沒被使用的 port，例：sudo WEB_HOST_PORT=<port> bash $0 -y"
+        [[ $YES == 1 ]] && die "請用環境變數指定可以用的 port（沒被使用、瀏覽器不會封鎖），例：sudo WEB_HOST_PORT=<port> bash $0 -y"
         WEB_HOST_PORT=""
     done
+    ask SITE_LABEL "網站標示（同一台有兩套時用來分辨，顯示在每一頁最上方，例：測試；不需要就留空）" ""
     if [[ -n "$BUNDLE_BASE" ]]; then
         ask BASE_IMAGE   "基礎 image（離線安裝包裡附的）" "$BUNDLE_BASE"
     else
@@ -247,6 +333,8 @@ else
     set_env BASE_IMAGE "$BASE_IMAGE"
     set_env PIP_INDEX_URL "$PIP_INDEX_URL"
     set_env PIP_TRUSTED_HOST "$PIP_TRUSTED_HOST"
+    set_env CVEHUB_IMAGE "$(image_repo_for "$PROJECT")"
+    set_env SITE_LABEL "$SITE_LABEL"
     set_env KERNEL_API_URL ""                  # 沒有 kernel API：用 CSV 的 kernel 欄位或最新安裝的 kernel
     mkdir -p config data
     if [[ "$HOST_SOURCE" == landscape ]]; then
@@ -265,6 +353,8 @@ else
     mv -f "$ENV_FILE" .env
     say "   .env 已建立（權限 600）；其他設定的說明在 .env 裡，之後要改：sudo nano $APP_DIR/.env 再 sudo docker compose up -d"
 fi
+
+check_image
 
 step "3/7 檢查基礎 image：$BASE_IMAGE"
 rc=1

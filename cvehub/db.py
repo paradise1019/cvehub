@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS vex_status (
     PRIMARY KEY (cve, release, source)
 );
 CREATE INDEX IF NOT EXISTS vex_rel_src ON vex_status(release, source);
+CREATE INDEX IF NOT EXISTS vex_source ON vex_status(source);          -- 歷年弱點的套件篩選
 
 -- 主機（來自 Landscape 或主機清單 CSV；kernel 欄位來自 kernel API 或 CSV；清單匯入的主機 landscape_id 是 NULL）
 CREATE TABLE IF NOT EXISTS host (
@@ -140,6 +141,16 @@ DROP INDEX IF EXISTS host_lname;                -- 0.9.4 開發中曾建立，�
 -- 資料版本號：比對結果、主機、例外規則有會影響總覽數量的改寫就加一（觸發器在 TRIGGERS），總覽的快取依它判斷要不要重算
 -- epoch：建立時的亂數，換成另一份資料庫時靠它分辨（同一份的備份 epoch 相同：還原前要先停容器）
 CREATE TABLE IF NOT EXISTS data_gen (id INTEGER PRIMARY KEY CHECK (id = 1), gen INTEGER NOT NULL, epoch TEXT NOT NULL);
+
+-- 歷年弱點：每個 CVE 的整體狀態（cves.build_status 在匯入 OSV／VEX 後算好；scope＝all 或 Ubuntu 版本）
+CREATE TABLE IF NOT EXISTS cve_status (
+    cve TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    code TEXT,                     -- fixed | partial | not-affected | not-in-release | 最需要注意的狀態代碼
+    fixed INTEGER, total INTEGER, unresolved INTEGER, packages INTEGER,
+    PRIMARY KEY (scope, cve)
+);
+CREATE TABLE IF NOT EXISTS cve_status_meta (id INTEGER PRIMARY KEY CHECK (id = 1), key TEXT, variants TEXT, built_at TEXT);
 
 -- 例外／風險接受
 CREATE TABLE IF NOT EXISTS exception (
@@ -252,6 +263,9 @@ def init(con):
     cols = {r[1] for r in con.execute("PRAGMA table_info(vuln)")}
     if "details" not in cols:
         con.execute("ALTER TABLE vuln ADD COLUMN details TEXT")      # 0.4.0：重新匯入 OSV 後才有內容
+    cols = {r[1] for r in con.execute("PRAGMA table_info(cve_status_meta)")}
+    if "variants" not in cols:                                        # 0.9.8 開發中的資料庫
+        con.execute("ALTER TABLE cve_status_meta ADD COLUMN variants TEXT")
     cols = {r[1] for r in con.execute("PRAGMA table_info(data_gen)")}
     if "epoch" not in cols:                                           # 0.9.5 開發中的資料庫
         con.execute("ALTER TABLE data_gen ADD COLUMN epoch TEXT")

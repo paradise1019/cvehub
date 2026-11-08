@@ -53,7 +53,8 @@ sudo bash /tmp/cvehub-src/*/install.sh
 | 主機來源 | `file` | `file`＝匯入主機清單；`landscape`＝接 Landscape（會再問網址與金鑰） |
 | Ubuntu 版本 | `20.04,22.04,24.04` | 你的主機有用到的版本 |
 | 時區 | `Asia/Taipei` | |
-| 網頁的 port | `8080` | 被其他程式佔用時會請你換一個；只給本機反向代理連時填 `127.0.0.1:8080` |
+| 網頁的 port | `8080` | 被其他程式佔用、或是瀏覽器會拒絕連線的 port（例如 10080、6000；Chrome 顯示 `ERR_UNSAFE_PORT`）時會請你換一個；只給本機反向代理連時填 `127.0.0.1:8080` |
+| 網站標示 | 空白 | 同一台主機裝兩套時用來分辨，例 `測試`（見下方「同一台裝第二套」）；只有一套就留空 |
 | 基礎 image | `python:3.12-slim` | 步驟 1 載入的名稱 |
 | Python 套件來源 | `https://pypi.org/simple` | 內部 Nexus 填它的 PyPI proxy，例 `https://nexus.example.com/repository/pypi-proxy/simple` |
 | 自簽憑證的主機名稱 | 空白 | Nexus 是自簽憑證才填，例 `nexus.example.com` |
@@ -88,6 +89,22 @@ sudo bash ~/cvehub-install/cvehub-<版本>-offline/cvehub-<版本>/install.sh
 - `.env` 的 `BASE_IMAGE` 要和安裝包裡的相同（`base-image.txt`），不同時不會自動載入
 - 安裝包要在和主機相同架構（一般是 x86_64／amd64）的機器上產生
 - 換基礎 image（例如每季的 Python 安全更新）：重新產生安裝包（會先 `docker pull` 最新的），再跑一次 install.sh；安裝包裡的 image 一律重新載入
+
+### 同一台裝第二套（例如放測試資料）
+正式資料和測試資料要分開時，在同一台主機另裝一套：兩套的資料庫、帳號、設定各自獨立，測試資料不會出現在正式那套的總覽、報表與歷史裡，不要了整套刪掉即可。
+```bash
+sudo CVEHUB_DIR=/opt/cvehub-test bash /tmp/cvehub-src/*/install.sh
+```
+（離線安裝包一樣在前面加 `CVEHUB_DIR=…`。）問題的回答：
+- **網頁的 port**：和第一套不同，例 `8081`。瀏覽器登入用的 cookie 會自動依 port 分開，兩套可以同時登入
+- **網站標示**：例 `測試`。每一頁最上方會有一條色帶、瀏覽器分頁標題前面加【測試】，上傳檔案前看得出是哪一套（顏色用 `.env` 的 `SITE_COLOR` 改；之後要改標示：改 `.env` 的 `SITE_LABEL`，再 `sudo docker compose up -d`）。正式那套也可以標，例 `正式` 配 `SITE_COLOR=green`
+
+要注意：
+- **安裝目錄的最後一段不能和第一套相同**（`/opt/cvehub` 與 `/srv/cvehub` 都是 `cvehub`）：Docker 會把兩套當成同一套、互相重建或停止對方的容器。install.sh 與更新時都會檢查，相同就停下（目前沒有做任何變更），請換目錄名稱，例 `/opt/cvehub-test`
+- 每一套各用自己的 image（`.env` 的 `CVEHUB_IMAGE`，依安裝目錄自動決定，例 `/opt/cvehub-test` 是 `cvehub-test`），重新建置或更新失敗還原時不會改到另一套。0.9.8 以前另外裝的第二套，更新到這一版時會自動設定（預設目錄 `/opt/cvehub` 那套維持 `cvehub`）
+- 兩套各自更新（各跑一次 install.sh，`CVEHUB_DIR` 指定目錄），回復也是各自的 `backups/`
+- 兩套的排程預設時間相同，OSV／VEX 匯入（各約 3–5 分鐘）會同時吃 CPU 與磁碟：把測試那套的 `SCHEDULE_SYNC` 錯開（例 `30 6,18 * * *`）。開了自動下載（`CVE_DATA_DOWNLOAD`）的話只在一套開，另一套用手動上傳，不必下載兩次
+- 磁碟：每套各有一份資料庫與 OSV／VEX 保存檔（各約數百 MB）
 
 ## 3. 開始使用
 
@@ -124,6 +141,7 @@ sudo bash ~/cvehub-install/cvehub-<版本>-offline/cvehub-<版本>/install.sh
 
 | 頁面 | 給誰 | 內容 |
 |---|---|---|
+| 歷年弱點 | 所有人 | Canonical 收錄的全部 CVE，依年份分頁籤；可搜尋編號、描述、套件，依版本、等級、整體狀態篩選；資料還沒收錄的 CVE 會說明原因 |
 | 總覽 | 所有人 | 各等級數量、資料日期、每台主機的 CVE 數與是否要重開機；主機清單可依名稱／IP、Ubuntu 版本、需重開機篩選，點欄位名稱排序，每頁 50 或 100 台 |
 | 受影響主機 | 維運 | 以 CVE 為單位：「待更新」（已有修正、主機還沒更新）、「尚無修正」，以及受影響的主機 |
 | 輸出報表 | 主管 | 依 CVE 公開日期（可一鍵選季）：主管摘要、統計、Kernel 修補版本、明細；可下載 Excel |
@@ -317,6 +335,8 @@ cd /opt/cvehub && sudo docker compose run --rm --no-deps -T cvehub python -m uni
 | VEX「無法辨識」不是 0 | Canonical 改了說明文字；在 `cvehub/vex_import.py` 的 `classify()` 加對應，跑測試後重新匯入 |
 | 新的 Ubuntu 版本上線 | `.env` 的 `UBUNTU_RELEASES` 加上新版本 → `sudo docker compose up -d` → 重新上傳 OSV 與 VEX |
 | 舊版本全部退役 | `UBUNTU_RELEASES` 拿掉 → 重新上傳，資料庫會變小 |
+| 安裝或更新時顯示「另一套 cvehub 使用相同的 Docker 專案名稱」 | 兩套安裝目錄的最後一段相同（見 2.「同一台裝第二套」）。新安裝：換目錄名稱；已經裝好的：到其中一套的目錄 `sudo docker compose down`，在它的 `.env` 加 `COMPOSE_PROJECT_NAME=cvehub-test`（別的名稱）後 `sudo docker compose up -d`，再到另一套的目錄 `sudo docker compose up -d`，用 `sudo docker ps` 確認兩套各有自己的容器後再更新（兩套共用專案名稱時主機上只會有一個容器，所以要先 down）。訊息裡的目錄已經不用、只剩容器時，刪掉那個容器即可（`sudo docker ps -a` 看 NAMES） |
+| 更新時顯示「另一套 cvehub 也使用 image …」 | 兩套的 `.env` 設了相同的 `CVEHUB_IMAGE`：把其中一套改成別的名稱再更新 |
 | Python 3.12 停止支援（2028-10） | 載入 `python:3.13-slim`，`.env` 改 `BASE_IMAGE`，再跑一次 install.sh |
 
 ## 附錄 I：限制

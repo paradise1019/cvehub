@@ -108,6 +108,21 @@ class Config:
     # HTTPS（直接由容器提供；留空＝HTTP，建議放在反向代理後面）
     WEB_TLS_CERT = _s("WEB_TLS_CERT")
     WEB_TLS_KEY = _s("WEB_TLS_KEY")
+    # 網站標示：同一台主機裝了兩套以上（例如正式、測試）時用來分辨；每一頁最上方與瀏覽器分頁標題顯示，留空＝不顯示
+    SITE_LABEL = _s("SITE_LABEL")[:40]
+    # 標示的顏色：red | orange | green | blue | purple | gray，或 #rrggbb；留空＝orange
+    SITE_COLOR = _s("SITE_COLOR")
+
+
+SITE_COLORS = {"red": "#cf222e", "orange": "#bc4c00", "green": "#1a7f37", "blue": "#0969da", "purple": "#8250df", "gray": "#57606a"}
+
+
+def site_color():
+    """SITE_COLOR 換成 CSS 色碼；名稱不認得、格式不對時用 orange（不讓設定值直接進 CSS）"""
+    v = Config.SITE_COLOR.lower()
+    if v in SITE_COLORS:
+        return SITE_COLORS[v]
+    return v if len(v) == 7 and v[0] == "#" and all(c in "0123456789abcdef" for c in v[1:]) else SITE_COLORS["orange"]
 
 
 PRIO = {"critical": 0, "high": 1, "medium": 2, "low": 3, "negligible": 4, "": 5}

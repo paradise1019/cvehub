@@ -2,6 +2,21 @@
 
 更新方式見 README「6. 更新、回復、備份」：解開新版 zip，`sudo bash <解開的目錄>/install.sh`。
 
+## 0.9.9
+同一台主機裝兩套（例如一套放正式資料、一套放測試資料）的修正，做法見 README「同一台裝第二套」：
+- 安裝與更新時檢查 Docker 專案名稱：兩套的安裝目錄最後一段相同（`/opt/cvehub` 與 `/srv/cvehub`）時 docker compose 會把兩套當成同一套（重建、停止對方的容器），之前沒有任何提示；現在 install.sh、更新與回復都會停下並說明怎麼處理，不做任何變更
+- 每一套各用自己的 image 名稱（`.env` 新設定 `CVEHUB_IMAGE`，install.sh 依安裝目錄決定，例 `/opt/cvehub-test` 是 `cvehub-test:<版本>`）：之前同版本的兩套共用 `cvehub:<版本>`，其中一套重新建置（例如換了基礎 image）或更新失敗還原時，另一套下次重建容器會用到別人的 image。預設目錄 `/opt/cvehub` 的那套名稱不變；0.9.8 以前另外裝的那套更新時自動寫入 `CVEHUB_IMAGE`（第一次更新會用新名稱建 image）。更新前保留的 image（`backups/` 對應的 tag）也各用各的名稱；建置前若發現別套的容器用同一個 image 名稱就停下
+- 回復成 0.9.8 以前的版本時，舊版的 image 名稱寫死在 docker-compose.yml，可能和另一套相同：確認前會先提示
+- 已知：回復成 0.9.8 之後再用 0.9.8 的腳本更新或清理備份時，非預設那套的保留 image（`cvehub-rollback-<名稱>:…`）不會被自動刪除，用 `sudo docker images | grep rollback` 找出來手動刪
+- 網站標示：`.env` 的 `SITE_LABEL`（例：測試）與 `SITE_COLOR`，每一頁（含登入頁）最上方顯示色帶、瀏覽器分頁標題加上標示；install.sh 會問，留空＝和之前一樣
+- install.sh 拒絕瀏覽器會拒絕連線的 port（10080、6000、6667 等；Chrome 顯示 `ERR_UNSAFE_PORT`、Firefox 顯示「此網址受到限制」）；只聽 `127.x` 給本機反向代理連時不檢查。已安裝的更新時只提醒
+- install.sh、更新時不使用殼層的 `COMPOSE_PROJECT_NAME`、`CVEHUB_IMAGE` 環境變數（要自訂請寫在 `.env`），之後手動執行 docker compose 才會是同一套
+
+## 0.9.8
+- 新頁籤「歷年弱點」：Canonical 收錄的全部 CVE（和主機有沒有裝無關），呈現方式參考 ubuntu.com/security/cves。上方依公開年份分頁籤（每個年份標筆數），可用 CVE 編號或描述關鍵字、套件、Ubuntu 版本、等級、整體狀態、只看主機有裝的套件篩選；每個 CVE 顯示等級、公開日期、整體狀態（已修正／部分有修正 x／y／受影響／待評估…）、描述摘要、相關套件與受管主機待更新台數，點進去是原本的 CVE 頁
+- Ubuntu 版本與整體狀態的篩選用事先算好的表（OSV／VEX 換了、主機有裝的雲端 kernel 變體改變時在同步時重算，指令列匯入後與啟動時也會檢查，約 20–30 秒；還沒算好時這兩個篩選暫不套用並提示「整理中」）。雲端 kernel 變體只算主機有裝的（同 CVE 頁）；「待更新」台數只算已有修正版本的
+- 搜尋或打開的 CVE 不在目前的 OSV／VEX 裡時，說明資料日期、Canonical 的檔案通常比 Ubuntu 官網晚約 1 天以上收錄新 CVE，並附 Ubuntu 官網連結
+
 ## 0.9.7
 - 自動下載 OSV／VEX（預設關閉）：`.env` 設 `CVE_DATA_DOWNLOAD=on` 後依 `SCHEDULE_CVE_DATA_DOWNLOAD`（預設每 6 小時）檢查 Canonical 的兩份檔案，用 ETag／Last-Modified 詢問，有更新才下載；下載完檢查大小與 xz／tar 格式、放進放檔目錄後自動匯入。檔案日期用 Canonical 的 Last-Modified；內容和已匯入的相同時不重複匯入
 - 只用 HTTPS（轉址到 http 也拒絕）；只給下載用的 proxy（`DOWNLOAD_PROXY`）與 CA（`DOWNLOAD_CA_FILE`）、單檔上限 `DOWNLOAD_MAX_MB`、每個檔案的時間上限 `DOWNLOAD_MAX_MINUTES`、剩餘空間不足 1 GB 不下載；同時只有一個下載（網頁排程、按鈕、指令列共用）；上次下載的那份沒有匯入（被清掉、資料庫還原）時重新下載

@@ -3,6 +3,10 @@
 {% block body %}
 <div class="card"><h2 style="margin:.2rem 0">{{ cve }}</h2>
 {% if v %}等級 {{ prio(v.priority) }}・CVSS {{ v.cvss or '-' }}・公開 {{ (v.published or '-')[:10] }}{% else %}<span class="muted">OSV 資料沒有這個 CVE</span>{% endif %}
+{% if notice %}<div class="warn" style="padding:.5rem .7rem;margin:.5rem 0;border:1px solid #d4a72c;border-radius:6px">
+ 目前使用的 Canonical 資料（OSV 檔案日期 {{ notice.osv_date or '無' }}、VEX 檔案日期 {{ notice.vex_date or '無' }}）<b>還沒有收錄 {{ notice.cve }}</b>。
+ Canonical 的 OSV／VEX 通常比 Ubuntu 官網晚約 1 天以上才收錄新的 CVE，等之後的檔案收錄、更新資料後就會出現；在那之前請看 Ubuntu 官網。
+ 編號也可能打錯了。</div>{% endif %}
 ・<a href="https://ubuntu.com/security/{{ cve }}" target="_blank" rel="noopener noreferrer">Ubuntu 安全頁面</a>
 {% if v and v.details %}<p class="muted" style="white-space:pre-wrap">{{ v.details[:1500] }}{% if v.details|length > 1500 %}…{% endif %}</p>{% endif %}</div>
 

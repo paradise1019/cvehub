@@ -14,10 +14,10 @@ import urllib.parse
 from flask import Flask, Response, abort, g, jsonify, redirect, render_template, request, session, url_for
 from werkzeug.exceptions import NotFound
 
-from . import __version__, auth, db, download, impact, osv_import, period, report, sync, vex_import
+from . import __version__, auth, cves, db, download, impact, osv_import, period, report, sync, vex_import
 from .lock import Busy, job_lock
 from .vercmp import vercmp
-from .config import PRIO, Config
+from .config import PRIO, Config, site_color
 
 log = logging.getLogger(__name__)
 _sync_lock = threading.Lock()
@@ -276,7 +276,8 @@ def create_app(start_scheduler=True):
                 "data_gap": abs(_age_days(imp) - _age_days(vex)) if imp and vex else 0,
                 "job": _status, "version": __version__, "PRIO": PRIO, "cfg": Config,
                 "user": g.get("user"), "role": g.get("role"), "is_admin": g.get("role") == "admin",
-                "role_label": auth.ROLE_LABEL, "csrf_token": _csrf}
+                "role_label": auth.ROLE_LABEL, "csrf_token": _csrf,
+                "site_label": Config.SITE_LABEL, "site_color": site_color() if Config.SITE_LABEL else ""}
 
     # ------------------------------------------------------------ 登入／帳號
     @app.route("/login", methods=["GET", "POST"])
@@ -504,13 +505,34 @@ def create_app(start_scheduler=True):
         rows = report.query_findings(g.con, state=state, hid=hid)
         return render_template("host.html", h=h, rows=rows, state=state)
 
+    @app.route("/cves")
+    def cves_page():
+        """歷年弱點：所有 CVE（參考 ubuntu.com/security/cves 的呈現）"""
+        a = request.args
+        rels = Config.UBUNTU_RELEASES
+        f = {"q": (a.get("q") or "").strip()[:200], "year": a.get("year") if (a.get("year") or "").isdigit() else "",
+             "priority": a.get("priority") if a.get("priority") in cves.LEVELS else "",
+             "release": a.get("release") if a.get("release") in rels else "",
+             "status": a.get("status") if a.get("status") in cves.OVERALL else "",
+             "package": (a.get("package") or "").strip()[:100], "installed": "1" if a.get("installed") == "1" else ""}
+        if cves.CVE_ID.match(f["q"]) and g.con.execute("SELECT 1 FROM vuln WHERE cve=?", (f["q"].upper(),)).fetchone():
+            return redirect(url_for("cve", cve=f["q"].upper()))           # 輸入完整的 CVE 編號：直接到 CVE 頁
+        try:
+            page = max(1, int(a.get("page", 1)))
+        except ValueError:
+            page = 1
+        r = cves.search(g.con, q=f["q"], year=f["year"], priority=f["priority"], release=f["release"], status=f["status"],
+                        installed_only=bool(f["installed"]), package=f["package"], page=page)
+        return render_template("cves.html", f=f, r=r, levels=cves.LEVELS, releases=rels, overall=cves.OVERALL,
+                               notice=cves.not_found_notice(g.con, f["q"]), per_page=cves.PER_PAGE)
+
     @app.route("/cve/<cve>")
     def cve(cve):
         cve = cve.upper()
         v = g.con.execute("SELECT * FROM vuln WHERE cve=?", (cve,)).fetchone()
         official, hosts = impact.cve_detail(g.con, cve)
         return render_template("cve.html", cve=cve, v=v, official=official, hosts=hosts, releases=Config.UBUNTU_RELEASES,
-                               label_en=vex_import.LABEL_EN,
+                               label_en=vex_import.LABEL_EN, notice=cves.not_found_notice(g.con, cve),
                                have_vex=bool(vex_import.active_import(g.con)), states=impact.STATES)
 
     @app.route("/exceptions", methods=["GET", "POST"])
@@ -651,11 +673,12 @@ def create_app(start_scheduler=True):
 
 
 def _warm_overview():
-    """在背景先算好總覽的數量（失敗沒關係，開總覽時會再算）"""
+    """在背景先算好總覽的數量、歷年弱點的整體狀態（失敗沒關係，開總覽時會再算；狀態篩選會提示整理中）"""
     con = None
     try:
         con = db.connect()
         report.host_overview_cached(con)
+        cves.build_status(con, blocking=False)      # 別人正在算（同步）就不等
     except Exception as e:
         log.warning("總覽預先計算失敗（開總覽時會重算）：%s", e)
     finally:

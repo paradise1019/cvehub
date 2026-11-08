@@ -333,6 +333,11 @@ def run_sync(con):
             raise RuntimeError("還沒有任何 OSV 資料：請把 osv-all.tar.xz 放到 %s" % Config.OSV_INBOX_DIR)
         if Config.HOST_SOURCE != "file":
             n = sync_hosts(con)
+        try:                                    # 歷年弱點的整體狀態：OSV／VEX、主機有裝的 kernel 變體換了才重算（主機同步之後）
+            from . import cves
+            cves.build_status(con)
+        except Exception as e:
+            log.warning("歷年弱點整體狀態整理失敗（版本與狀態篩選暫時不能用）：%s", e)
         new = res = 0
         for h in con.execute("SELECT * FROM host WHERE active=1").fetchall():
             a, b = update_findings(con, h, evaluate_host(con, h))

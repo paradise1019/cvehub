@@ -1,0 +1,37 @@
+{% extends "base.html" %}{% from "_prio.html" import prio %}{% from "_pager.html" import pager %}
+{% block title %}歷年弱點{% endblock %}
+{% block body %}
+<div class="card intro"><b>歷年弱點</b>：Canonical 收錄的全部 CVE（和主機有沒有裝無關），依公開日期新的在前。點 CVE 看官方狀態（套件 × 版本）與受管主機。
+整體狀態：各套件 × 版本都已修正＝已修正；有修正也有未解決＝部分有修正（已修正／相關格數）；其他顯示最需要注意的狀態。
+「有未解決」＝有待評估、受影響、修正中、延後修正或不修正的。</div>
+<form class="card" method="get">
+ <input name="q" value="{{ f.q }}" size="30" placeholder="CVE 編號或描述關鍵字">
+ 套件 <input name="package" value="{{ f.package }}" size="12" placeholder="例：apt、openssl">
+ Ubuntu <select name="release"><option value="">全部版本</option>{% for rel in releases %}<option {% if f.release == rel %}selected{% endif %}>{{ rel }}</option>{% endfor %}</select>
+ 等級 <select name="priority"><option value="">全部</option>{% for lv in levels %}<option {% if f.priority == lv %}selected{% endif %}>{{ lv }}</option>{% endfor %}</select>
+ 狀態 <select name="status"><option value="">全部</option>{% for k, v in overall.items() %}<option value="{{ k }}" {% if f.status == k %}selected{% endif %}>{{ v }}</option>{% endfor %}</select>
+ <label><input type="checkbox" name="installed" value="1" {% if f.installed %}checked{% endif %}>只看主機有裝的套件</label>
+ <input type="hidden" name="year" value="{{ f.year }}">
+ <button>搜尋</button>{% if f.q or f.package or f.release or f.priority or f.status or f.installed %} <a href="{{ url_for('cves_page', year=f.year) }}">清除</a>{% endif %}
+</form>
+{% if (f.status or f.release) and not r.status_ready %}<div class="card warn">狀態統計整理中（匯入新資料或升級後約 1 分鐘），這次沒有套用「Ubuntu 版本」與「狀態」篩選，請稍後重新整理。</div>{% endif %}
+{% if notice %}<div class="card warn">目前使用的 Canonical 資料（OSV 檔案日期 {{ notice.osv_date or '無' }}、VEX 檔案日期 {{ notice.vex_date or '無' }}）<b>還沒有收錄 {{ notice.cve }}</b>。
+Canonical 的 OSV／VEX 通常比 Ubuntu 官網晚約 1 天以上才收錄新的 CVE，等之後的檔案收錄、更新資料後就會出現；在那之前請看
+<a href="{{ notice.url }}" target="_blank" rel="noopener noreferrer">Ubuntu 官網的 {{ notice.cve }}</a>。編號也可能打錯了。</div>{% endif %}
+<div class="tabs">{% set base = dict(f, page=1) %}
+ <a href="{{ url_for('cves_page', **dict(base, year='')) }}" class="{{ 'on' if not f.year }}">全部</a>
+ {% for y, n in r.years %}<a href="{{ url_for('cves_page', **dict(base, year=y)) }}" class="{{ 'on' if f.year == y }}">{{ y }} <span class="muted">{{ n }}</span></a>{% endfor %}
+</div>
+<p class="muted">共 {{ r.total }} 個 CVE{% if f.year %}（{{ f.year }} 年公開）{% endif %}</p>
+{{ pager('cves_page', f, r.page, r.pages, r.total, per_page) }}
+{% for x in r.rows %}<div class="card cvecard">
+ <div><a href="{{ url_for('cve', cve=x.cve) }}"><b>{{ x.cve }}</b></a> {{ prio(x.priority) }}
+  <span class="tag s-{{ x.overall.code if x.overall.code != 'partial' else 'vulnerable-wip' }}">{{ x.overall.label }}</span>
+  <span class="muted">公開 {{ x.published or '-' }}{% if x.cvss %}・<span title="{{ x.cvss }}">CVSS {{ x.cvss.split('/')[0].replace('CVSS:', 'v') if x.cvss.startswith('CVSS:') else x.cvss }}</span>{% endif %}</span>
+  {% if x.pending_hosts %}・<a href="{{ url_for('cve', cve=x.cve) }}"><b>{{ x.pending_hosts }} 台受管主機待更新</b></a>{% endif %}</div>
+ <div class="muted" style="margin:.3rem 0">{{ x.excerpt }}</div>
+ <div>{% if x.packages %}{{ x.packages|length }} 個相關套件：{{ x.packages[:6]|join('、') }}{% if x.packages|length > 6 %}…{% endif %}{% else %}<span class="muted">{{ releases|join('／') if not f.release else f.release }} 沒有相關套件</span>{% endif %}</div>
+</div>{% else %}{% if not notice %}<div class="card muted">沒有符合的 CVE。</div>{% endif %}{% endfor %}
+{{ pager('cves_page', f, r.page, r.pages, r.total, per_page) }}
+{% if not r.have_vex %}<p class="muted">尚未匯入 VEX：狀態只分「已修正／受影響」。</p>{% endif %}
+{% endblock %}

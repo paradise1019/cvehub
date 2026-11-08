@@ -11,7 +11,7 @@ services:
         HTTPS_PROXY: ${BUILD_HTTPS_PROXY:-}
         NO_PROXY: ${BUILD_NO_PROXY:-}
         CODE_FP: ${CODE_FP:-}              # 由 scripts/upgrade.sh 帶入，不要寫在 .env
-    image: cvehub:0.9.7
+    image: ${CVEHUB_IMAGE:-cvehub}:0.9.9    # 名稱在 .env 的 CVEHUB_IMAGE（同一台的每一套各用各的）；版本號不要改
     env_file: .env
     ports:
       - "${WEB_HOST_PORT:-8080}:8080"      # 主機的 port 在 .env 的 WEB_HOST_PORT 設定；右邊是容器內部，不要改
