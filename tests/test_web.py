@@ -46,6 +46,22 @@ class WebTest(unittest.TestCase):
         web.run_job = self._run_job
         self.env.__exit__()
 
+    def test_inbox_dirs_created_at_startup(self):
+        # 全新安裝還沒上傳過任何檔案，放檔目錄就要在（README 叫使用者直接把檔案放進去）
+        for d in (Config.OSV_INBOX_DIR, Config.VEX_INBOX_DIR, Config.HOSTS_INBOX_DIR):
+            self.assertTrue(os.path.isdir(d), d)
+
+    def test_unwritable_inbox_dir_warns(self):
+        # 使用者用 root 建立的放檔目錄：容器移不走檔案，啟動時要在 log 提示怎麼改
+        from cvehub import web
+        real = os.access
+        with unittest.mock.patch.object(web.os, "access", lambda p, m: p != Config.HOSTS_INBOX_DIR and real(p, m)), \
+                self.assertLogs("cvehub.web", "WARNING") as logs:
+            web.create_app(start_scheduler=False)
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn(Config.HOSTS_INBOX_DIR, logs.output[0])
+        self.assertIn("data/hosts-inbox", logs.output[0])
+
     def test_hosts_upload_only_in_file_mode(self):
         def csv_():
             return (io.BytesIO(b"hostname,release,package,version\nweb01,24.04,openssl,3.0.13-0ubuntu3\n"), "h.csv")

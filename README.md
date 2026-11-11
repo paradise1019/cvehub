@@ -189,7 +189,7 @@ dpkg-query -W -f='${db:Status-Abbrev}\t${binary:Package}\t${Version}\n' \
   | awk -F'\t' -v p="$(hostname),$(hostname -I | awk '{print $1}'),$VERSION_ID,,$(uname -r),$(awk '{print $2}' /proc/version_signature),$(date -u +%FT%TZ)" 'substr($1,2,1)=="i" {print p "," $2 "," $3}'
 ```
 
-除了網頁上傳，也可以把檔案放到 `/opt/cvehub/data/hosts-inbox/`（每 30 分鐘檢查），或用指令 `import-hosts`（附錄 E）。
+除了網頁上傳，也可以把檔案放到 `/opt/cvehub/data/hosts-inbox/`（cvehub 啟動時建立，每 30 分鐘檢查），或用指令 `import-hosts`（附錄 E）。這個目錄請不要自己用 root 建立：容器以 UID 10001 執行，對目錄沒有寫入權就無法把處理完的檔案移到 `hosts-archive/`，同步會一直失敗。
 
 ## 5. 日常維護
 

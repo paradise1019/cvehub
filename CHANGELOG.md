@@ -2,6 +2,10 @@
 
 更新方式見 README「6. 更新、回復、備份」：解開新版 zip，`sudo bash <解開的目錄>/install.sh`。
 
+## 0.9.10
+- 放檔目錄（`data/inbox`、`data/vex-inbox`、`data/hosts-inbox`）在 cvehub 啟動時建立：之前只有從網頁上傳過檔案才會出現，全新安裝後照 README 直接把主機清單 CSV 放進 `data/hosts-inbox/` 會找不到目錄。已安裝的更新後重啟就會補上
+- 這些目錄請不要自己用 root 建立：容器以 UID 10001 執行，對目錄沒有寫入權就無法把處理完的檔案移到 archive 目錄，同步每次都會失敗。啟動時發現無法寫入會在容器 log 提示。之前已經用 root 建立的，用 `sudo chown -R 10001 /opt/cvehub/data/{inbox,vex-inbox,hosts-inbox}`（路徑換成實際的安裝目錄）改回來
+
 ## 0.9.9
 同一台主機裝兩套（例如一套放正式資料、一套放測試資料）的修正，做法見 README「同一台裝第二套」：
 - 安裝與更新時檢查 Docker 專案名稱：兩套的安裝目錄最後一段相同（`/opt/cvehub` 與 `/srv/cvehub`）時 docker compose 會把兩套當成同一套（重建、停止對方的容器），之前沒有任何提示；現在 install.sh、更新與回復都會停下並說明怎麼處理，不做任何變更

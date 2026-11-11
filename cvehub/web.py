@@ -152,6 +152,19 @@ def create_app(start_scheduler=True):
     db.init(con)
     auth.bootstrap(con)
     con.close()
+    # 放檔目錄一啟動就建立（容器以 /data 的擁有者執行），使用者可以直接把檔案放進去；
+    # 用 root 自己建立的目錄，容器無法把處理完的檔案移走（同步會一直失敗）：啟動時提示
+    for d in (Config.OSV_INBOX_DIR, Config.VEX_INBOX_DIR, Config.HOSTS_INBOX_DIR):
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError as e:
+            logging.getLogger(__name__).warning("無法建立放檔目錄 %s：%s", d, e)
+            continue
+        if not os.access(d, os.W_OK | os.X_OK):
+            logging.getLogger(__name__).warning(
+                "放檔目錄 %s 無法寫入（容器以 UID %d 執行），放進去的檔案處理完移不走、同步會失敗；"
+                "在主機上把它改成 UID %d 擁有（例：sudo chown -R %d <安裝目錄>/data/%s）", d, os.getuid(), os.getuid(),
+                os.getuid(), os.path.basename(d.rstrip("/")))
     app.secret_key = auth.secret_key()
     app.config.update(SESSION_COOKIE_NAME=cookie_name(), SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
                       SESSION_COOKIE_SECURE=Config.WEB_COOKIE_SECURE or bool(Config.WEB_TLS_CERT))
