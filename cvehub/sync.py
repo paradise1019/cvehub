@@ -37,9 +37,29 @@ def _fresh(collected_at):
     return bool(t) and _recent(t)
 
 
+def _check_not_shrunk(con, comps):
+    """Landscape 回傳的電腦突然變成 0 台、或少了一大半：多半是 API／權限／查詢條件出問題，不是真的下架。
+    照做的話這些主機會被停用、弱點從畫面上消失，所以讓這次同步失敗（保留原狀，/healthz 會回報），由管理員確認。
+    設了 LANDSCAPE_QUERY 時本來就不停用主機，不檢查"""
+    if Config.LANDSCAPE_QUERY:
+        return
+    linked = [r[0] for r in con.execute("SELECT landscape_id FROM host WHERE active=1 AND landscape_id IS NOT NULL")]
+    if not linked:
+        return
+    ids = {c["id"] for c in comps}
+    gone = sum(1 for i in linked if i not in ids)
+    if not comps:
+        raise RuntimeError("Landscape 回傳 0 台電腦（目前有 %d 台啟用中）：不停用主機，請確認 Landscape API 與帳號權限" % len(linked))
+    pct = Config.LANDSCAPE_MAX_DROP_PERCENT
+    if pct > 0 and len(linked) >= 4 and gone * 100 > len(linked) * pct:
+        raise RuntimeError("Landscape 少了 %d／%d 台啟用中的電腦（超過 LANDSCAPE_MAX_DROP_PERCENT=%d%%）：不停用主機；"
+                           "確實下架了這麼多台時，暫時調高這個設定再同步一次" % (gone, len(linked), pct))
+
+
 def sync_hosts(con):
     ls = Landscape()
     comps = ls.computers()
+    _check_not_shrunk(con, comps)
     kern = None
     per_host = bool(Config.KERNEL_API_URL) and Config.KERNEL_API_MODE == "per-host"
     kstatus_default = "missing" if Config.KERNEL_API_URL else "disabled"
@@ -107,6 +127,11 @@ def sync_hosts(con):
             elif hostnames.candidates(rows, hn):
                 log.warning("沒有接續停用的同名主機（%s）：分不出是哪一台，或已有連到 Landscape 的同一台；%s 另建一筆",
                             "、".join(hostnames.full(r) for r in hostnames.candidates(rows, hn)), hn)
+        if not pk and cur and (cur["package_count"] or 0) > 0:
+            # 原本有套件、這次回報 0 個：多半是 Landscape 暫時沒資料（剛重新註冊、API 異常），不是真的全部移除。
+            # 沿用上一次的套件清單，否則這台的弱點會全部變成「已解決」
+            log.warning("Landscape 回報 %s 沒有任何已安裝套件（上次有 %d 個）：沿用上次的套件清單", hn, cur["package_count"])
+            pk = {r["name"]: r["version"] for r in con.execute("SELECT name,version FROM host_package WHERE host_id=?", (cur["id"],))}
         krel = kver = kcol = None
         kst = kstatus_default
         if api_error:
@@ -145,12 +170,28 @@ def sync_hosts(con):
 # ---------------------------------------------------------------- 比對
 
 def _old_kernels(pk):
-    newest = {}
+    """沒有執行中 kernel 的資料時不檢查的舊 kernel 套件：同系列、同 flavour 有 ABI 更新的 linux-image 時才算舊。
+    「最新」只看 linux-image（真的能開機的 kernel），而且各 flavour 分開算：只裝了 headers／tools 的較新 ABI、
+    或別的 flavour（例如 azure 的 tools）編號比較大，不能讓唯一的 kernel 被當成舊的略過。
+    名稱沒有 flavour 的套件（linux-headers-6.8.0-139）和同系列任何 flavour 的 image 比"""
+    newest = {}                     # (系列, flavour) → 最新的 image ABI
     for n in pk:
         m = KERNEL_ABI.match(n)
-        if m:
-            newest[m.group(1)] = max(newest.get(m.group(1), 0), int(m.group(2)))
-    return {n for n in pk if (m := KERNEL_ABI.match(n)) and int(m.group(2)) < newest[m.group(1)]}
+        if m and "-image-" in n:
+            k = (m.group(1), m.group(3))
+            newest[k] = max(newest.get(k, 0), int(m.group(2)))
+    by_series = {}
+    for (series, _), abi in newest.items():
+        by_series[series] = max(by_series.get(series, 0), abi)
+    old = set()
+    for n in pk:
+        m = KERNEL_ABI.match(n)
+        if not m:
+            continue
+        top = newest.get((m.group(1), m.group(3))) if m.group(3) else by_series.get(m.group(1))
+        if top is not None and int(m.group(2)) < top:
+            old.add(n)
+    return old
 
 
 def _newest_kernel_version(pk, release):
@@ -167,12 +208,18 @@ def _newest_kernel_version(pk, release):
 KERNEL_NAME = re.compile(r"^(linux-(?:image|image-unsigned|modules))-(\d+\.\d+\.\d+)-\d+-([a-z0-9-]+)$")
 
 
-def _kernel_source_by_series(con, eco, name):
-    """例：linux-image-6.8.0-139-generic → 找 binmap 裡 linux-image-6.8.0-*-generic 最常對到的 source"""
+def _kernel_source_by_series(con, eco, name, cache=None):
+    """例：linux-image-6.8.0-139-generic → 找 binmap 裡 linux-image-6.8.0-*-generic 最常對到的 source。
+    cache：同一次同步裡各主機共用的 dict（同系列只查一次）"""
     m = KERNEL_NAME.match(name)
     if not m:
         return None
     prefix, series, flavor = m.groups()
+    if cache is not None:
+        k = (eco, prefix, series, flavor)
+        if k not in cache:
+            cache[k] = _kernel_source_by_series(con, eco, name)
+        return cache[k]
     rx = re.compile(r"^%s-%s-\d+-%s$" % (re.escape(prefix), re.escape(series), re.escape(flavor)))
     counts = {}
     for r in con.execute("SELECT binary, source FROM binmap WHERE ecosystem=? AND binary LIKE ?",
@@ -182,8 +229,29 @@ def _kernel_source_by_series(con, eco, name):
     return max(counts, key=counts.get) if counts else None
 
 
-def evaluate_host(con, h):
-    """回傳這台主機目前的比對結果 {key: row}"""
+def _source_map(con, items, base, proe, cache=None):
+    """{binary: source}：先查 binmap（一般版本優先，沒有才用 Pro 的對應）；kernel 套件的 ABI 名稱不一定出現在 OSV 裡
+    （binmap 只有當過修正版本的 ABI），對不到時用同系列、同 flavour 的其他 ABI 推回 source——執行中的與已安裝的都要，
+    否則舊 ABI 的 kernel 完全不會被比對"""
+    names = sorted({i[0] for i in items})
+    srcmap, pro_srcmap = {}, {}
+    for i in range(0, len(names), 500):
+        chunk = names[i:i + 500]
+        q = "SELECT ecosystem, binary, source FROM binmap WHERE ecosystem IN (?,?) AND binary IN (%s)" % ",".join("?" * len(chunk))
+        for r in con.execute(q, [base, proe] + chunk):
+            (srcmap if r["ecosystem"] == base else pro_srcmap)[r["binary"]] = r["source"]
+    for b, s in pro_srcmap.items():
+        srcmap.setdefault(b, s)
+    for n in names:
+        if n not in srcmap and KERNEL_NAME.match(n):
+            src = _kernel_source_by_series(con, base, n, cache) or _kernel_source_by_series(con, proe, n, cache)
+            if src:
+                srcmap[n] = src
+    return srcmap
+
+
+def evaluate_host(con, h, cache=None):
+    """回傳這台主機目前的比對結果 {key: row}；cache：同一次同步裡各主機共用的 dict（可不給）"""
     pk = {r["name"]: r["version"] for r in con.execute("SELECT name,version FROM host_package WHERE host_id=?", (h["id"],))}
     rel = h["release"]
     base, proe = "Ubuntu:%s:LTS" % rel, "Ubuntu:Pro:%s:LTS" % rel
@@ -204,21 +272,15 @@ def evaluate_host(con, h):
         newest_k = None
     items += [(n, v, "installed") for n, v in pk.items() if n not in skip]
 
-    names = sorted({i[0] for i in items})
-    srcmap, pro_srcmap = {}, {}
-    for i in range(0, len(names), 500):
-        chunk = names[i:i + 500]
-        q = "SELECT ecosystem, binary, source FROM binmap WHERE ecosystem IN (?,?) AND binary IN (%s)" % ",".join("?" * len(chunk))
-        for r in con.execute(q, [base, proe] + chunk):
-            (srcmap if r["ecosystem"] == base else pro_srcmap)[r["binary"]] = r["source"]
-    for b, s in pro_srcmap.items():      # 一般版本優先，沒有才用 Pro 的對應
-        srcmap.setdefault(b, s)
-    if running_kernel:
-        # 執行中 kernel 的 ABI 名稱不一定出現在 OSV 裡：改用同系列、同 flavor 的其他 ABI 推回 source 套件
-        for n in [i[0] for i in items if i[2] == "running-kernel" and i[0] not in srcmap]:
-            src = _kernel_source_by_series(con, base, n) or _kernel_source_by_series(con, proe, n)
-            if src:
-                srcmap[n] = src
+    srcmap = _source_map(con, items, base, proe, cache)
+    if running_kernel and not any(i[0] in srcmap for i in items if i[2] == "running-kernel"):
+        # 執行中的 kernel 對不到任何 source（自己編的 kernel、OSV 沒有的變體）：之前會連已安裝的 kernel 套件都不看，
+        # 這台就沒有任何 kernel 弱點也沒有提示。改成和沒有執行中 kernel 資料時一樣，檢查已安裝的 kernel
+        log.warning("主機 %s 執行中的 kernel %s 在 OSV 裡找不到對應的套件：改檢查已安裝的 kernel 套件", h["hostname"], h["kernel_release"])
+        skip = set() if Config.CHECK_OLD_KERNELS else _old_kernels(pk)
+        items = [(n, v, "installed") for n, v in pk.items() if n not in skip]
+        newest_k = None
+        srcmap = _source_map(con, items, base, proe, cache)
     vul = {}
     srcs = sorted(set(srcmap.values()))
     for i in range(0, len(srcs), 500):
@@ -264,6 +326,12 @@ def evaluate_host(con, h):
     return out
 
 
+# 有設定 kernel 資料來源、但這次拿不到可信的執行中 kernel：查詢失敗、資料過期、沒有這台的資料。
+# 這時比對會退回「最新安裝的 kernel」，原本記在執行中 kernel 上的弱點不能因此變成已解決（等資料恢復再判斷）。
+# disabled（沒有設定 kernel 資料來源）不在內：那是改了設定，照新的方式比對
+KERNEL_UNKNOWN = ("error", "stale", "missing")
+
+
 def update_findings(con, h, current):
     t = now()
     new = resolved = 0
@@ -284,8 +352,8 @@ def update_findings(con, h, current):
                             "last_seen=?,resolved_at=NULL WHERE id=?", cols + (t, r["id"]))
         for key, r in existing.items():
             if key not in current and not r["resolved_at"]:
-                if h["kernel_status"] == "error" and r["location"] == "running-kernel":
-                    continue        # kernel API 查詢失敗：不知道是否已重開機，保持未解決
+                if h["kernel_status"] in KERNEL_UNKNOWN and r["location"] == "running-kernel":
+                    continue        # 沒有可信的執行中 kernel 資料：不知道是否已重開機，保持未解決
                 con.execute("UPDATE finding SET resolved_at=? WHERE id=?", (t, r["id"]))
                 resolved += 1
     return new, resolved
@@ -339,16 +407,24 @@ def run_sync(con):
         except Exception as e:
             log.warning("歷年弱點整體狀態整理失敗（版本與狀態篩選暫時不能用）：%s", e)
         new = res = 0
+        cache, skipped = {}, []
         for h in con.execute("SELECT * FROM host WHERE active=1").fetchall():
-            a, b = update_findings(con, h, evaluate_host(con, h))
+            try:
+                a, b = update_findings(con, h, evaluate_host(con, h, cache))
+            except Exception:
+                # 一台的資料有問題（例如格式不對的版本字串）不能讓整次同步失敗：這台維持上次的結果，其他照常
+                log.exception("主機 %s 比對失敗，維持上次的結果", h["hostname"])
+                skipped.append(h["hostname"])
+                continue
             new += a
             res += b
+        note = ("比對失敗、維持上次結果的主機 %d 台：%s" % (len(skipped), "、".join(skipped)))[:500] if skipped else None
         open_ = con.execute("SELECT COUNT(*) FROM finding f JOIN host h ON h.id=f.host_id WHERE f.resolved_at IS NULL AND h.active=1").fetchone()[0]
         cutoff = (datetime.datetime.now() - datetime.timedelta(days=Config.HISTORY_KEEP_DAYS)).isoformat(timespec="seconds")
         with con:
             con.execute("DELETE FROM finding WHERE resolved_at IS NOT NULL AND resolved_at < ?", (cutoff,))
             con.execute("UPDATE sync_run SET finished_at=?,status='ok',hosts=?,open_findings=?,new_findings=?,resolved_findings=?,"
-                        "osv_import_id=? WHERE id=?", (now(), n, open_, new, res, imp["id"], rid))
+                        "osv_import_id=?,message=? WHERE id=?", (now(), n, open_, new, res, imp["id"], note, rid))
             prune_history(con, cutoff)          # 在這次標成成功之後：「最後一次成功」就是這一次
         log.info("同步完成：主機 %d、未解決 %d、新增 %d、已解決 %d", n, open_, new, res)
         from . import report

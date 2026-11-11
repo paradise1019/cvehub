@@ -33,6 +33,8 @@ class Config:
     LANDSCAPE_QUERY = _s("LANDSCAPE_QUERY")
     LANDSCAPE_TIMEOUT = _i("LANDSCAPE_TIMEOUT", 300)
     LANDSCAPE_RETRIES = _i("LANDSCAPE_RETRIES", 3)
+    # Landscape 回傳的電腦比啟用中的少超過這個百分比（或變成 0 台）時同步失敗、不停用主機；0＝只擋 0 台
+    LANDSCAPE_MAX_DROP_PERCENT = _i("LANDSCAPE_MAX_DROP_PERCENT", 50)
 
     KERNEL_API_URL = _s("KERNEL_API_URL")
     # bulk：一次取得全部主機；per-host：每台主機查一次（URL 裡放 {hostname} {shortname} {ip}）

@@ -25,3 +25,14 @@ class VercmpTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NonAsciiDigitTest(unittest.TestCase):
+    def test_non_ascii_digit_does_not_hang(self):
+        from cvehub.vercmp import vercmp
+        self.assertNotEqual(vercmp("1.0²", "1.0"), 0)       # 之前是無窮迴圈
+        self.assertNotEqual(vercmp("1.0", "1.0①"), 0)
+        with self.assertRaises(ValueError):
+            vercmp("x:1", "1")
+        with self.assertRaises(ValueError):
+            vercmp("²:1", "1")

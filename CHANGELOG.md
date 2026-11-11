@@ -2,6 +2,18 @@
 
 更新方式見 README「6. 更新、回復、備份」：解開新版 zip，`sudo bash <解開的目錄>/install.sh`。
 
+## 0.9.11
+程式碼審查後的第一批修正：資料來源異常時弱點被誤標成「已解決」、kernel 套件漏比、同步卡住。更新後第一次同步，下列情況原本漏掉的 kernel 弱點會出現在「新增」裡：
+- kernel 資料過期（`stale`）或沒有這台的資料（`missing`）時，原本記在執行中 kernel 上的弱點不再變成已解決（之前只有查詢失敗 `error` 有保護）；資料恢復後照實際的 kernel 判斷
+- 沒有執行中 kernel 資料時判斷「舊 kernel」：只和同系列、同 flavour 的 `linux-image` 比。之前只要裝了 ABI 編號較大的 headers／tools、或別的 flavour（例如 azure 的 tools），唯一的 kernel 就被當成舊的略過
+- 已安裝 kernel 的 ABI 名稱沒有出現在 OSV 時，和執行中的 kernel 一樣用同系列推回 source 套件（之前完全不比對）；執行中的 kernel 在 OSV 裡對不到任何套件時（自己編的 kernel 等）改檢查已安裝的 kernel 並在 log 提示，不再整台沒有 kernel 弱點
+- Landscape 回傳 0 台，或比啟用中的少超過 `LANDSCAPE_MAX_DROP_PERCENT`（新設定，預設 50，啟用中 4 台以上才檢查）時，同步失敗、不停用主機；真的一次下架很多台時暫時調高再同步
+- Landscape 回報某台沒有任何已安裝套件、而上次有：沿用上次的套件清單並在 log 提示，不把這台的弱點全部解決
+- 版本字串含「²」「①」這類非 ASCII 數字時版本比對會無窮迴圈，同步卡住且之後每次都被略過：已修正（cvetrack 同）
+- 單一主機比對失敗（例如 Landscape 回報格式不對的版本）不再讓整次同步失敗：那台維持上次的結果，同步紀錄的訊息欄列出主機
+- 背景同步連不上資料庫時沒有放開鎖，之後的同步都顯示「執行中」直到重啟：已修正
+- Ansible 收集主機清單的 playbook 加上 `pipefail`：`dpkg-query` 中途失敗時該主機算失敗，不再送出不完整的套件清單
+
 ## 0.9.10
 - 放檔目錄（`data/inbox`、`data/vex-inbox`、`data/hosts-inbox`）在 cvehub 啟動時建立：之前只有從網頁上傳過檔案才會出現，全新安裝後照 README 直接把主機清單 CSV 放進 `data/hosts-inbox/` 會找不到目錄。已安裝的更新後重啟就會補上
 - 這些目錄請不要自己用 root 建立：容器以 UID 10001 執行，對目錄沒有寫入權就無法把處理完的檔案移到 archive 目錄，同步每次都會失敗。啟動時發現無法寫入會在容器 log 提示。之前已經用 root 建立的，用 `sudo chown -R 10001 /opt/cvehub/data/{inbox,vex-inbox,hosts-inbox}`（路徑換成實際的安裝目錄）改回來

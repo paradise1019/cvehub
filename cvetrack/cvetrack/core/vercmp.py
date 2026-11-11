@@ -2,8 +2,13 @@
 import re
 
 
+def _digit(c):
+    """只認 ASCII 的 0–9：str.isdigit() 對「²」「①」這類字元也是 True（之前會造成無窮迴圈）"""
+    return "0" <= c <= "9"
+
+
 def _order(c):
-    if c.isdigit():
+    if _digit(c):
         return 0
     if c.isalpha():
         return ord(c)
@@ -17,14 +22,14 @@ def _order(c):
 def _cmp_part(a, b):
     while a or b:
         first = 0
-        while (a and not a[0].isdigit()) or (b and not b[0].isdigit()):
+        while (a and not _digit(a[0])) or (b and not _digit(b[0])):
             ac = _order(a[0]) if a else 0
             bc = _order(b[0]) if b else 0
             if ac != bc:
                 return ac - bc
             a, b = a[1:], b[1:]
-        da = re.match(r"\d*", a).group()
-        db = re.match(r"\d*", b).group()
+        da = re.match(r"[0-9]*", a).group()
+        db = re.match(r"[0-9]*", b).group()
         a, b = a[len(da):], b[len(db):]
         first = int(da or 0) - int(db or 0)
         if first:

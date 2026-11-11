@@ -1060,3 +1060,120 @@ class HostMatchKeyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FalseNegativeTest(unittest.TestCase):
+    """0.9.11：資料來源異常時不能把弱點變成已解決、kernel 套件不能漏比"""
+
+    def setUp(self):
+        self.env = TempEnv().__enter__()
+        osv_import.import_file(self.env.con, make_osv_tar(os.path.join(self.env.dir.name, "o.tar.xz"), RECORDS))
+
+    def tearDown(self):
+        self.env.__exit__()
+
+    def landscape(self, comps, pk):
+        from unittest import mock
+        ls = mock.Mock()
+        ls.computers.return_value = comps
+        ls.installed_packages.return_value = pk
+        return mock.patch.object(sync, "Landscape", return_value=ls)
+
+    def comp(self, i):
+        return {"id": i, "hostname": "h%d.example.com" % i, "title": "h%d" % i, "distribution": "24.04"}
+
+    def test_stale_or_missing_kernel_data_keeps_running_kernel_findings(self):
+        from unittest import mock
+        from cvehub.config import Config
+        c = self.env.con
+        saved = Config.KERNEL_API_URL, Config.KERNEL_API_MODE
+        Config.KERNEL_API_URL, Config.KERNEL_API_MODE = "http://k/?h={hostname}", "per-host"
+        try:
+            pk = {"linux-image-6.8.0-139-generic": "6.8.0-139.139", "linux-image-6.8.0-147-generic": "6.8.0-147.147"}
+            ok = {"release": "6.8.0-139-generic", "version": "6.8.0-139.139", "collected_at": sync.now()}
+            old = dict(ok, collected_at="2020-01-01T00:00:00")
+            for answer, status in ((old, "stale"), (None, "missing")):
+                with self.landscape([self.comp(1)], pk), mock.patch.object(sync, "kernel_for_host", return_value=ok):
+                    sync.sync_hosts(c)
+                h = c.execute("SELECT * FROM host").fetchone()
+                sync.update_findings(c, h, sync.evaluate_host(c, h))
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM finding WHERE location='running-kernel' AND resolved_at IS NULL").fetchone()[0], 1)
+                with self.landscape([self.comp(1)], pk), mock.patch.object(sync, "kernel_for_host", return_value=answer):
+                    sync.sync_hosts(c)
+                h = c.execute("SELECT * FROM host").fetchone()
+                self.assertEqual(h["kernel_status"], status)
+                self.assertEqual(sync.update_findings(c, h, sync.evaluate_host(c, h))[1], 0, status)     # 不會變成已解決
+        finally:
+            Config.KERNEL_API_URL, Config.KERNEL_API_MODE = saved
+
+    def test_only_image_of_same_flavour_makes_a_kernel_old(self):
+        c = self.env.con
+        img = {"linux-image-6.8.0-139-generic": "6.8.0-139.139"}
+        for i, extra in enumerate(({"linux-headers-6.8.0-147-generic": "6.8.0-147.147"},
+                                   {"linux-tools-6.8.0-1040-azure": "6.8.0-1040.46"},
+                                   {"linux-image-6.8.0-147-lowlatency": "6.8.0-147.147"})):
+            res = sync.evaluate_host(c, add_host(c, dict(img, **extra), "f%d.example.com" % i))
+            self.assertIn(("CVE-2026-0005", "linux-image-6.8.0-139-generic", "installed"), res, extra)
+        self.assertEqual(sync._old_kernels({"linux-image-6.8.0-139-generic": "1", "linux-image-6.8.0-147-generic": "1",
+                                            "linux-headers-6.8.0-139": "1", "linux-modules-6.8.0-139-generic": "1"}),
+                         {"linux-image-6.8.0-139-generic", "linux-headers-6.8.0-139", "linux-modules-6.8.0-139-generic"})
+
+    def test_installed_kernel_abi_not_in_osv(self):
+        """已安裝 kernel 的 ABI 名稱沒出現在 OSV：和執行中的一樣用同系列推回 source"""
+        c = self.env.con
+        res = sync.evaluate_host(c, add_host(c, {"linux-image-6.8.0-120-generic": "6.8.0-120.120"}), {})
+        self.assertIn(("CVE-2026-0005", "linux-image-6.8.0-120-generic", "installed"), res)
+
+    def test_unmappable_running_kernel_falls_back_to_installed(self):
+        c = self.env.con
+        h = add_host(c, {"linux-image-6.8.0-139-generic": "6.8.0-139.139"},
+                     kernel={"release": "6.99.0-1-custom", "version": "6.99.0-1.1", "status": "ok"})
+        with self.assertLogs("cvehub.sync", "WARNING"):
+            res = sync.evaluate_host(c, h)
+        self.assertIn(("CVE-2026-0005", "linux-image-6.8.0-139-generic", "installed"), res)
+
+    def test_landscape_empty_or_shrunken_result_fails_sync(self):
+        from cvehub.config import Config
+        c = self.env.con
+        pk = {"openssl": "3.0.13-0ubuntu3"}
+        with self.landscape([self.comp(i) for i in range(1, 5)], pk):
+            sync.sync_hosts(c)
+        for comps in ([], [self.comp(1)]):
+            with self.landscape(comps, pk), self.assertRaises(RuntimeError):
+                sync.sync_hosts(c)
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM host WHERE active=1").fetchone()[0], 4)
+        with self.landscape([self.comp(1), self.comp(2)], pk):                  # 少一半：沒超過 50%，照常停用
+            sync.sync_hosts(c)
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM host WHERE active=1").fetchone()[0], 2)
+        saved, Config.LANDSCAPE_MAX_DROP_PERCENT = Config.LANDSCAPE_MAX_DROP_PERCENT, 0
+        try:
+            with self.landscape([self.comp(1)], pk):
+                sync.sync_hosts(c)                                              # 0＝只擋 0 台
+        finally:
+            Config.LANDSCAPE_MAX_DROP_PERCENT = saved
+
+    def test_empty_package_list_keeps_previous_packages(self):
+        c = self.env.con
+        with self.landscape([self.comp(1)], {"openssl": "3.0.13-0ubuntu3"}):
+            sync.sync_hosts(c)
+        h = c.execute("SELECT * FROM host").fetchone()
+        self.assertEqual(sync.update_findings(c, h, sync.evaluate_host(c, h)), (2, 0))
+        with self.landscape([self.comp(1)], {}), self.assertLogs("cvehub.sync", "WARNING"):
+            sync.sync_hosts(c)
+        h = c.execute("SELECT * FROM host").fetchone()
+        self.assertEqual(h["package_count"], 1)
+        self.assertEqual(sync.update_findings(c, h, sync.evaluate_host(c, h)), (0, 0))
+
+    def test_one_bad_host_does_not_fail_the_sync(self):
+        from cvehub.config import Config
+        c = self.env.con
+        saved, Config.HOST_SOURCE = Config.HOST_SOURCE, "file"
+        try:
+            add_host(c, {"openssl": "x:1"}, "bad.example.com")                  # epoch 不是數字：vercmp 丟例外
+            add_host(c, {"openssl": "3.0.13-0ubuntu3"}, "good.example.com")
+            rid = sync.run_sync(c)
+        finally:
+            Config.HOST_SOURCE = saved
+        r = c.execute("SELECT * FROM sync_run WHERE id=?", (rid,)).fetchone()
+        self.assertEqual((r["status"], r["new_findings"]), ("ok", 2))
+        self.assertIn("bad", r["message"])

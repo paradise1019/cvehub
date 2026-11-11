@@ -2,7 +2,7 @@
 import re
 
 KERNEL_ABI = re.compile(r"^linux-(?:hwe-[0-9.]+-)?(?:image|image-unsigned|modules|modules-extra|headers|tools|cloud-tools|buildinfo)"
-                        r"-(\d+\.\d+\.\d+)-(\d+)(?:-[a-z0-9-]+)?$")
+                        r"-(\d+\.\d+\.\d+)-(\d+)(?:-([a-z0-9-]+))?$")
 SIG_VERSION = re.compile(r"(\d+\.\d+\.\d+-\d+\.\d+(?:~[0-9.]+)?)")
 
 

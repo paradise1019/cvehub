@@ -31,8 +31,9 @@ def run_job(kind, path=None):
 
     def work():
         _status.update(running=True, message="%s 執行中…" % kind)
-        con = db.connect()
+        con = None
         try:
+            con = db.connect()          # 在 try 裡面：連不上資料庫時也要放開 _sync_lock，否則之後的同步都會被略過
             with job_lock():
                 if kind == "import" and path:
                     osv_import.import_file(con, path)
@@ -45,7 +46,8 @@ def run_job(kind, path=None):
         except Exception as e:
             _status["message"] = "%s 失敗：%s" % (kind, e)
         finally:
-            con.close()
+            if con is not None:
+                con.close()
             _status["running"] = False
             _sync_lock.release()
     threading.Thread(target=work, daemon=True).start()
