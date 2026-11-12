@@ -221,7 +221,9 @@ cd /opt/cvehub
 ls backups/                                           # 例：20261102-093000-0.8.1
 sudo bash scripts/upgrade.sh --rollback backups/20261102-093000-0.8.1
 ```
-程式與資料庫回到更新前（`.env`、`config/` 不還原）。`backups/` 自動只留最近 5 份。
+程式與資料庫回到那份備份的狀態（`.env`、`config/`、`docker-compose.override.yml` 不還原）；備份之後新增或修改的帳號、例外規則、稽核紀錄也會回到當時，確認前會顯示備份時間。
+還原前，目前的資料庫會先另存到 `backups/<時間>-pre-rollback/cvehub.sqlite3`。選錯備份要拿回來時：`sudo docker compose stop`，把它複製成 `data/cvehub.sqlite3`（先刪掉旁邊的 `-wal`、`-shm`），`sudo chown 10001 data/cvehub.sqlite3`，再 `sudo docker compose up -d`。
+`backups/` 自動只留最近 5 份（含這種另存的）。
 
 ### 6.3 備份
 定期把 `data/cvehub.sqlite3`、`.env`、`config/` 複製到別台機器。資料庫備份不用停機：

@@ -8,7 +8,8 @@
 #   安裝目錄：預設是這支腳本的上一層；從解開的新版執行時用 CVEHUB_DIR=/opt/cvehub 指定
 #   備份：backups/ 只保留最近 5 份（CVEHUB_KEEP_BACKUPS 可改）
 #
-# 只替換程式檔；.env、data/、config/、backups/、docker-compose.override.yml 不會動。
+# 只替換程式檔；.env、data/、config/、backups/、docker-compose.override.yml 的內容不會動
+#（擁有者與權限會收緊：程式與設定歸 root、.env 600、data/ 不給其他帳號讀）。
 # 流程：備份程式與設定 → 換程式 → 建 image → 跑測試（失敗就自動還原程式，舊版容器照常運作）
 #       → 停容器 → 備份資料庫 → 啟動新版 → 健康檢查
 set -Eeuo pipefail
@@ -333,9 +334,30 @@ remove_code() {
     done
 }
 
-restore_code() {   # $1＝備份目錄；.env 與 config/ 不還原（可能在更新後改過）
+restore_code() {   # $1＝備份目錄；.env、config/、docker-compose.override.yml 不還原（可能在更新後改過）
     remove_code
-    tar -xzf "$1/code.tgz" -C "$APP_DIR" --exclude=./.env --exclude=./config
+    # --no-same-owner：舊備份裡的檔案可能歸解開 zip 的一般帳號
+    tar -xzf "$1/code.tgz" -C "$APP_DIR" --no-same-owner --exclude=./.env --exclude=./.env.new --exclude=./config \
+        --exclude=./docker-compose.override.yml
+    secure_install
+}
+
+# 安裝目錄的擁有者與權限：程式、腳本、compose 設定都以 root 執行或由 root 讀取，必須只有 root 能改。
+# zip 多半是一般帳號解開的，照原樣複製的話檔案會歸那個帳號，它不用 sudo 就能改之後以 root 執行的腳本。
+# data/ 維持容器的 UID（10001）擁有，但拿掉「其他人」的權限：資料庫有密碼雜湊、稽核紀錄與全部主機的弱點清單
+secure_install() {
+    local it f
+    [[ $EUID -eq 0 ]] || return 0       # 不是 root（docker 群組的帳號直接執行）時改不了擁有者：略過
+    chown root:root "$APP_DIR"
+    chmod go-w "$APP_DIR"
+    for it in "${CODE_ITEMS[@]}" docker-compose.override.yml .env; do
+        f="$APP_DIR/$it"
+        [[ -e "$f" || -L "$f" ]] || continue
+        chown -R -h root:root "$f"
+        [[ -L "$f" ]] || chmod -R go-w "$f"
+    done
+    if [[ -f "$APP_DIR/.env" && ! -L "$APP_DIR/.env" ]]; then chmod 600 "$APP_DIR/.env"; fi
+    if [[ -d "$APP_DIR/data" ]]; then chmod o-rwx "$APP_DIR/data"; fi
 }
 
 service_cid() {   # cvehub 服務容器（不含 docker compose run 的一次性容器）
@@ -532,10 +554,11 @@ upgrade() {
     local it
     for it in "${CODE_ITEMS[@]}"; do
         if [[ -e "$src/$it" ]]; then
-            cp -a "$src/$it" "$APP_DIR/$it"
+            cp -a --no-preserve=ownership "$src/$it" "$APP_DIR/$it"
         fi
     done
     mkdir -p "$APP_DIR/wheels"          # Dockerfile 一定會 COPY 它（沒有離線套件時是空的）
+    secure_install
 
     local missing
     missing="$(comm -23 <(grep -oE '^[A-Z_][A-Z0-9_]*=' "$APP_DIR/.env.example" 2>/dev/null | sort -u || true) \
@@ -618,7 +641,8 @@ rollback() {
 c = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro&immutable=1", uri=True)
 sys.exit(0 if c.execute("pragma quick_check").fetchone()[0] == "ok" else 1)' "$bk/cvehub.sqlite3" 2>/dev/null; then
             db_ok=1
-            out "資料庫也會還原成更新前的狀態"
+            out "資料庫也會還原成這份備份的狀態（備份時間 $(date -r "$bk/cvehub.sqlite3" '+%F %T')）：之後新增或修改的帳號、例外規則、稽核紀錄都會回到當時"
+            out "目前的資料庫會先另存一份到 backups/<現在時間>-pre-rollback/，需要時可以拿回來"
             if [[ ! -f "$bk/db.ok" ]]; then
                 out "ℹ️  這是舊版腳本的備份：主檔通過完整性檢查，但無法確認當時的 WAL 是否複製完整"
             fi
@@ -647,14 +671,35 @@ sys.exit(0 if c.execute("pragma quick_check").fetchone()[0] == "ok" else 1)' "$b
     trap '' HUP                         # 回復期間 SSH 斷線不中止
     # 停容器：用 compose 的 label 找出這個目錄的所有容器（compose 檔不在或壞掉也找得到）；確定都停了才往下
     stop_all || die "cvehub 容器停不下來，無法安全還原資料庫；請先手動停止再執行一次"
+    # 還原資料庫前，先把目前的另存一份（容器已停；SQLite 線上備份＝含 WAL 的單一完整檔案）。存不下來就不往下做：
+    # 選錯備份、或後面的步驟失敗時，較新的資料才拿得回來
+    if [[ $db_ok == 1 && -f "$APP_DIR/data/cvehub.sqlite3" ]]; then
+        local pre
+        pre="$APP_DIR/backups/$(date +%Y%m%d-%H%M%S)-pre-rollback"
+        mkdir -p "$pre"
+        chmod 700 "$pre"
+        if python3 -c 'import sqlite3, sys
+s = sqlite3.connect(sys.argv[1]); d = sqlite3.connect(sys.argv[2]); s.backup(d); d.close(); s.close()' \
+                "$APP_DIR/data/cvehub.sqlite3" "$pre/cvehub.sqlite3.part" && mv -- "$pre/cvehub.sqlite3.part" "$pre/cvehub.sqlite3"; then
+            info "目前的資料庫已另存：$pre/cvehub.sqlite3"
+        else
+            rm -rf -- "$pre"
+            PHASE=""
+            docker compose up -d >/dev/null 2>&1 || true
+            die "無法另存目前的資料庫（磁碟空間不足？），沒有做任何還原；服務已重新啟動（請確認）。處理後再執行一次 --rollback"
+        fi
+    fi
     restore_code "$bk"
     if [[ $db_ok == 1 ]]; then
         rm -f -- "$APP_DIR"/data/cvehub.sqlite3-wal "$APP_DIR"/data/cvehub.sqlite3-shm
-        local f
-        for f in "$bk"/cvehub.sqlite3 "$bk"/cvehub.sqlite3-wal "$bk"/cvehub.sqlite3-shm; do   # 舊版腳本的備份可能有 WAL
+        local f dest
+        # 舊版腳本的備份可能有 WAL；主檔最後才放，而且先寫 .part 再改名：中斷時不會留下寫一半的資料庫
+        for f in "$bk"/cvehub.sqlite3-wal "$bk"/cvehub.sqlite3-shm "$bk"/cvehub.sqlite3; do
             if [[ -f "$f" ]]; then
-                cp -- "$f" "$APP_DIR/data/$(basename "$f")"
-                chown --reference="$APP_DIR/data" "$APP_DIR/data/$(basename "$f")"   # 容器以 data/ 的擁有者（UID 10001）寫入
+                dest="$APP_DIR/data/$(basename "$f")"
+                cp -- "$f" "$dest.part"
+                chown --reference="$APP_DIR/data" "$dest.part"   # 容器以 data/ 的擁有者（UID 10001）寫入
+                mv -f -- "$dest.part" "$dest"
             fi
         done
     fi

@@ -181,7 +181,30 @@ KEEP_EXCLUDES=(.env .env.new .install-incomplete data config backups docker-comp
 copy_code() {
     [[ "$SRC" == "$APP_DIR" ]] && return
     mkdir -p "$APP_DIR"
-    tar -C "$SRC" "${KEEP_EXCLUDES[@]/#/--exclude=./}" -cf - . | tar -C "$APP_DIR" -xf -
+    # 不沿用來源的擁有者與權限（root 的 umask 會拿掉群組／其他人的寫入權）
+    tar -C "$SRC" "${KEEP_EXCLUDES[@]/#/--exclude=./}" -cf - . | tar -C "$APP_DIR" --no-same-owner --no-same-permissions -xf -
+    secure_install
+}
+
+# 安裝目錄的擁有者與權限：程式、腳本、compose 設定都以 root 執行或由 root 讀取，必須只有 root 能改。
+# zip 多半是一般帳號解開的，照原樣複製的話檔案會歸那個帳號，它不用 sudo 就能改之後以 root 執行的腳本。
+# data/ 維持容器的 UID（10001）擁有，但拿掉「其他人」的權限：資料庫有密碼雜湊、稽核紀錄與全部主機的弱點清單
+secure_install() {
+    local f k keep
+    chown root:root "$APP_DIR"
+    chmod go-w "$APP_DIR"
+    for f in "$APP_DIR"/* "$APP_DIR"/.[!.]*; do
+        [[ -e "$f" || -L "$f" ]] || continue
+        keep=0
+        for k in data config backups; do [[ "$(basename "$f")" == "$k" ]] && keep=1; done
+        [[ $keep == 1 ]] && continue
+        chown -R -h root:root "$f"
+        [[ -L "$f" ]] || chmod -R go-w "$f"
+    done
+    for f in "$APP_DIR/.env" "$APP_DIR/.env.new"; do
+        if [[ -f "$f" && ! -L "$f" ]]; then chmod 600 "$f"; fi
+    done
+    if [[ -d "$APP_DIR/data" ]]; then chmod o-rwx "$APP_DIR/data"; fi
 }
 
 [[ $EUID -eq 0 ]] || die "請用 sudo 執行：sudo bash $0"
@@ -261,6 +284,7 @@ if [[ -f "$APP_DIR/.env" && -e "$INCOMPLETE" ]]; then
     fi
     mkdir -p config data
     chown -R 10001 data
+    secure_install
 else
     # ------------------------------------------------------------ 全新安裝
     say "cvehub $VERSION 全新安裝 → $APP_DIR"
@@ -349,6 +373,7 @@ else
         fi
     fi
     chown -R 10001 data                        # 容器內以 UID 10001 執行
+    secure_install                             # data/ 不給其他帳號讀（資料庫、報表）
     touch "$INCOMPLETE"
     mv -f "$ENV_FILE" .env
     say "   .env 已建立（權限 600）；其他設定的說明在 .env 裡，之後要改：sudo nano $APP_DIR/.env 再 sudo docker compose up -d"
@@ -385,13 +410,18 @@ else
 fi
 
 step "5/7 自動化測試"
-docker compose run --rm --no-deps -T cvehub python -m unittest discover -s tests -t . </dev/null >/tmp/cvehub-test.log 2>&1 \
-    || die "測試失敗，記錄在 /tmp/cvehub-test.log"
-say "   $(grep -E '^Ran ' /tmp/cvehub-test.log)，全部通過"
+# 記錄檔用 mktemp（/tmp 下固定的檔名可以被其他帳號預先建立或換成連結）
+TEST_LOG="$(mktemp -t cvehub-test.XXXXXX)"
+docker compose run --rm --no-deps -T cvehub python -m unittest discover -s tests -t . </dev/null >"$TEST_LOG" 2>&1 \
+    || die "測試失敗，記錄在 $TEST_LOG"
+say "   $(grep -E '^Ran ' "$TEST_LOG")，全部通過"
+rm -f -- "$TEST_LOG"
 
 step "6/7 建立管理員帳號"
-users="$(docker compose run --rm --no-deps -T cvehub python -c "from cvehub import db; c = db.connect(); db.init(c); print(c.execute('SELECT COUNT(*) FROM users').fetchone()[0])" </dev/null 2>/tmp/cvehub-db.log | tail -1 || true)"
-[[ "$users" =~ ^[0-9]+$ ]] || die "無法讀取資料庫（訊息在 /tmp/cvehub-db.log）；修正後重新執行：$RERUN"
+DB_LOG="$(mktemp -t cvehub-db.XXXXXX)"
+users="$(docker compose run --rm --no-deps -T cvehub python -c "from cvehub import db; c = db.connect(); db.init(c); print(c.execute('SELECT COUNT(*) FROM users').fetchone()[0])" </dev/null 2>"$DB_LOG" | tail -1 || true)"
+[[ "$users" =~ ^[0-9]+$ ]] || die "無法讀取資料庫（訊息在 $DB_LOG）；修正後重新執行：$RERUN"
+rm -f -- "$DB_LOG"
 if [[ "$users" -gt 0 ]]; then
     say "   已有 $users 個帳號，略過"
 elif [[ $YES == 1 ]]; then
