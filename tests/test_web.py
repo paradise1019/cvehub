@@ -163,6 +163,16 @@ class WebTest(unittest.TestCase):
         self.env.con.commit()
         r = self.c.get("/healthz")
         self.assertEqual((r.status_code, r.get_json()["problems"]), (503, ["kernel_api_error"]))
+        self.env.con.execute("UPDATE host SET kernel_status='ok'")
+        self.env.con.execute("INSERT INTO sync_run(started_at,finished_at,status,message) VALUES (?,?,'ok','比對失敗、維持上次結果的主機 1 台：x')",
+                             (sync.now(), sync.now()))
+        self.env.con.commit()
+        r = self.c.get("/healthz")                      # 成功、但有主機比對失敗
+        self.assertEqual((r.status_code, r.get_json()["problems"]), (503, ["hosts_not_evaluated"]))
+        self.env.con.execute("INSERT INTO sync_run(started_at,status) VALUES (?,'running')", (sync.now(),))
+        self.env.con.commit()
+        r = self.c.get("/healthz")                      # 同步執行中：上一次的問題不能暫時消失
+        self.assertEqual((r.status_code, r.get_json()["problems"]), (503, ["hosts_not_evaluated"]))
 
     def test_bad_input_400_and_redirect(self):
         h = dict(self.auth, Origin="http://localhost")

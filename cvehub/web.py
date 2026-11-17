@@ -31,8 +31,9 @@ def run_job(kind, path=None):
 
     def work():
         _status.update(running=True, message="%s 執行中…" % kind)
-        con = db.connect()
+        con = None
         try:
+            con = db.connect()          # 在 try 裡面：連不上資料庫時也要放開 _sync_lock，否則之後的同步都會被略過
             with job_lock():
                 if kind == "import" and path:
                     osv_import.import_file(con, path)
@@ -45,7 +46,8 @@ def run_job(kind, path=None):
         except Exception as e:
             _status["message"] = "%s 失敗：%s" % (kind, e)
         finally:
-            con.close()
+            if con is not None:
+                con.close()
             _status["running"] = False
             _sync_lock.release()
     threading.Thread(target=work, daemon=True).start()
@@ -637,13 +639,16 @@ def create_app(start_scheduler=True):
         elif imp["file_mtime"] and (nowt - datetime.datetime.fromisoformat(imp["file_mtime"])).days >= Config.OSV_STALE_WARN_DAYS:
             problems.append("osv_data_stale")
         last_ok = c.execute("SELECT finished_at FROM sync_run WHERE status='ok' ORDER BY id DESC LIMIT 1").fetchone()
-        last = c.execute("SELECT status FROM sync_run ORDER BY id DESC LIMIT 1").fetchone()
+        # 最後一次完成的同步（執行中的那筆還沒有結果：不能讓上一次的問題在同步期間暫時消失）
+        last = c.execute("SELECT status, message FROM sync_run WHERE status<>'running' ORDER BY id DESC LIMIT 1").fetchone()
         if not last_ok:
             problems.append("never_synced")
         elif (nowt - datetime.datetime.fromisoformat(last_ok["finished_at"])).total_seconds() > Config.HEALTH_MAX_SYNC_AGE_HOURS * 3600:
             problems.append("sync_too_old")
         if last and last["status"] == "failed":
             problems.append("last_sync_failed")
+        elif last and last["status"] == "ok" and last["message"]:
+            problems.append("hosts_not_evaluated")    # 成功的同步只有在有主機比對失敗時才寫 message（run_sync）
         if c.execute("SELECT 1 FROM host WHERE active=1 AND kernel_status='error' LIMIT 1").fetchone():
             problems.append("kernel_api_error")
         bad_imp = c.execute("SELECT status FROM osv_import ORDER BY id DESC LIMIT 1").fetchone()

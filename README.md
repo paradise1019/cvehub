@@ -120,7 +120,7 @@ sudo CVEHUB_DIR=/opt/cvehub-test bash /tmp/cvehub-src/*/install.sh
 
 **自動下載**（主機連得到外網或 proxy 時）：`.env` 設 `CVE_DATA_DOWNLOAD=on`，再 `cd /opt/cvehub && sudo docker compose up -d`。
 之後依 `SCHEDULE_CVE_DATA_DOWNLOAD`（預設每 6 小時）檢查 Canonical 的兩份檔案，有更新才下載（沒更新時只問一次、不傳檔案），下載完自動匯入、重新比對。
-- 要經過 proxy：`DOWNLOAD_PROXY=http://proxy.example.com:3128`（只有下載用，不影響 Landscape／kernel API）；proxy 會攔截 HTTPS 時，把它的 CA 放到 `config/`，設 `DOWNLOAD_CA_FILE=/config/proxy-ca.crt`
+- 要經過 proxy：`DOWNLOAD_PROXY=http://proxy.example.com:3128`（只有下載用，不影響 Landscape／kernel API）；proxy 會攔截 HTTPS 時，把它的 CA 放到 `config/`（`sudo install -m 644 proxy-ca.crt /opt/cvehub/config/`：容器帳號要讀得到，主機的 umask 較嚴時用 `cp` 會變成只有 root 能讀），設 `DOWNLOAD_CA_FILE=/config/proxy-ca.crt`
 - 「資料匯入」頁顯示每份的上次檢查、結果與 Canonical 的檔案日期；管理員可按「立即檢查並下載」；指令：`sudo docker compose exec cvehub python -m cvehub.cli download`
 - 超過 `DOWNLOAD_ALERT_HOURS`（預設 48）小時沒有成功檢查，`/healthz` 會回報 `cve_download_failing`
 - Canonical 沒有提供檢查碼或簽章：靠 HTTPS 憑證驗證，下載後先檢查大小與 xz／tar 格式，匯入時再檢查內容（每個版本的筆數下限）；不合格的不會取代使用中的資料
@@ -221,7 +221,9 @@ cd /opt/cvehub
 ls backups/                                           # 例：20261102-093000-0.8.1
 sudo bash scripts/upgrade.sh --rollback backups/20261102-093000-0.8.1
 ```
-程式與資料庫回到更新前（`.env`、`config/` 不還原）。`backups/` 自動只留最近 5 份。
+程式與資料庫回到那份備份的狀態（`.env`、`config/`、`docker-compose.override.yml` 不還原）；備份之後新增或修改的帳號、例外規則、稽核紀錄也會回到當時，確認前會顯示備份時間。
+還原前，目前的資料庫會先另存到 `backups/<時間>-pre-rollback/cvehub.sqlite3`。選錯備份要拿回來時：`sudo docker compose stop`，把它複製成 `data/cvehub.sqlite3`（先刪掉旁邊的 `-wal`、`-shm`），`sudo chown 10001 data/cvehub.sqlite3`，再 `sudo docker compose up -d`。
+`backups/` 自動只留最近 5 份更新備份；回復前另存的另外最多留 5 份。
 
 ### 6.3 備份
 定期把 `data/cvehub.sqlite3`、`.env`、`config/` 複製到別台機器。資料庫備份不用停機：
@@ -272,7 +274,7 @@ server {
 }
 ```
 
-**容器直接提供 HTTPS**：憑證與私鑰放 `config/`（私鑰擁有者 UID 10001、權限 600），`.env` 設 `WEB_TLS_CERT=/config/tls.crt`、`WEB_TLS_KEY=/config/tls.key`，`sudo docker compose up -d`。
+**容器直接提供 HTTPS**：憑證與私鑰放 `config/`（`sudo install -m 644 tls.crt /opt/cvehub/config/`、`sudo install -o 10001 -m 600 tls.key /opt/cvehub/config/`：容器帳號 UID 10001 要讀得到），`.env` 設 `WEB_TLS_CERT=/config/tls.crt`、`WEB_TLS_KEY=/config/tls.key`，`sudo docker compose up -d`。
 
 ## 附錄 D：監控（/healthz）
 
@@ -284,6 +286,7 @@ server {
 | `osv_data_stale`／`vex_data_stale` | 檔案超過 7 天（`OSV_STALE_WARN_DAYS`） | 下載新檔上傳 |
 | `last_osv_import_failed`／`last_vex_import_failed` | 最近一次匯入失敗（舊資料仍在使用） | 看「資料匯入」頁的訊息 |
 | `never_synced`／`sync_too_old`／`last_sync_failed` | 比對從沒成功／太久沒成功／最近失敗 | `sudo docker compose logs --tail 50` |
+| `hosts_not_evaluated` | 最近一次比對有主機失敗，那幾台維持上次的結果（首頁「最近同步」的訊息欄列出主機） | `sudo docker compose logs --tail 200` 找「比對失敗」 |
 | `kernel_api_error` | （接 kernel API 時）查詢失敗，沿用上次的資料 | 檢查 token、對方服務 |
 
 清單匯入模式下，排程仍會每天重新比對兩次（`SCHEDULE_SYNC`），沒上傳新清單不會造成 `sync_too_old`。
@@ -307,7 +310,7 @@ sudo docker compose exec cvehub python -m cvehub.cli user-disable <帳號>      
 ## 附錄 F：接 Landscape 與 kernel API
 
 `.env` 設 `HOST_SOURCE=landscape`，填「C. Landscape API」，`sudo docker compose up -d`。cvehub 依 `SCHEDULE_SYNC` 從 Landscape 取得電腦與已安裝套件（legacy API `GetComputers`、`GetPackages`，24.04／26.04 皆可）。
-- 金鑰請用只能檢視電腦的專用帳號產生（Settings → API credentials）；自簽憑證把 Landscape 伺服器上的 `/etc/ssl/certs/landscape_server_ca.crt` 放到 `config/`。
+- 金鑰請用只能檢視電腦的專用帳號產生（Settings → API credentials）；自簽憑證把 Landscape 伺服器上的 `/etc/ssl/certs/landscape_server_ca.crt` 放到 `config/`（`sudo install -m 644 landscape_server_ca.crt /opt/cvehub/config/`，原因同上）。
 - Landscape 的套件清單由 client 定期回報，主機升級後最慢約 45 分鐘才反映。
 
 **kernel API**（選用）：提供每台主機執行中的 kernel，讓 kernel CVE 依執行中版本判斷。填「D. kernel API」：

@@ -2,7 +2,7 @@
 import re
 
 KERNEL_ABI = re.compile(r"^linux-(?:hwe-[0-9.]+-)?(?:image|image-unsigned|modules|modules-extra|headers|tools|cloud-tools|buildinfo)"
-                        r"-(\d+\.\d+\.\d+)-(\d+)(?:-[a-z0-9-]+)?$")
+                        r"-(\d+\.\d+\.\d+)-(\d+)(?:-([a-z0-9-]+))?$")
 SIG_VERSION = re.compile(r"(\d+\.\d+\.\d+-\d+\.\d+(?:~[0-9.]+)?)")
 
 
@@ -32,3 +32,11 @@ def is_kernel(src):
 def kernel_variant(src):
     """linux 與 linux-hwe-* 以外的 kernel source（雲端、OEM、lowlatency…）；linux-firmware 不是 kernel"""
     return src.startswith("linux-") and not src.startswith("linux-hwe-") and src != "linux-firmware"
+
+
+def ambiguous_variant_binary(src, binary):
+    """RISC-V kernel（linux-riscv、linux-riscv-6.14…）的 binary 名稱沒有 riscv 字樣的（linux-image-6.8.0-60-generic 等）
+    和 x86 的 linux／linux-hwe-* 同名，OSV 又沒寫架構：不能拿來判斷主機裝了 riscv kernel。匯入時不記這個對應，
+    主機上的同名套件照一般 kernel 比對（binmap 沒有的 ABI 用同系列推回 linux）。
+    舊版本的 linux-hwe、linux-lts-* 也用 -generic 名稱，但它們就是 x86 的 HWE kernel，不在此列"""
+    return src.startswith("linux-riscv") and "riscv" not in binary

@@ -33,6 +33,8 @@ class Config:
     LANDSCAPE_QUERY = _s("LANDSCAPE_QUERY")
     LANDSCAPE_TIMEOUT = _i("LANDSCAPE_TIMEOUT", 300)
     LANDSCAPE_RETRIES = _i("LANDSCAPE_RETRIES", 3)
+    # Landscape 回傳的電腦比啟用中的少超過這個百分比（或變成 0 台）時同步失敗、不停用主機；0＝只擋 0 台
+    LANDSCAPE_MAX_DROP_PERCENT = _i("LANDSCAPE_MAX_DROP_PERCENT", 50)
 
     KERNEL_API_URL = _s("KERNEL_API_URL")
     # bulk：一次取得全部主機；per-host：每台主機查一次（URL 裡放 {hostname} {shortname} {ip}）
@@ -48,6 +50,8 @@ class Config:
     KERNEL_API_FIELD_RELEASE = _s("KERNEL_API_FIELD_RELEASE", "kernel_release")
     KERNEL_API_FIELD_COLLECTED_AT = _s("KERNEL_API_FIELD_COLLECTED_AT", "collected_at")
     KERNEL_API_MAX_AGE_HOURS = _i("KERNEL_API_MAX_AGE_HOURS", 48)
+    # kernel 資料過期或查無這台時，沿用上一次可信的執行中 kernel 最多幾天（從那份資料的收集時間算）；0＝不沿用
+    KERNEL_KEEP_DAYS = _i("KERNEL_KEEP_DAYS", 7)
 
     HOST_MATCH_KEY = _s("HOST_MATCH_KEY", "shortname")
     HOST_MATCH_CASE_INSENSITIVE = _b("HOST_MATCH_CASE_INSENSITIVE", True)

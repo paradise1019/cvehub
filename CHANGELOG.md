@@ -2,6 +2,47 @@
 
 更新方式見 README「6. 更新、回復、備份」：解開新版 zip，`sudo bash <解開的目錄>/install.sh`。
 
+## 0.9.13
+x86 主機被算成 RISC-V kernel（`linux-riscv`）：
+- Ubuntu 的 RISC-V kernel 產生的套件名稱和 x86 的一般 kernel 一樣（例如 `linux-image-6.8.0-60-generic`），OSV 資料沒有寫架構。之前先匯入的對應優先，部分 ABI（24.04 的 6.8.0-47／53／55／60、HWE 6.14／6.17、22.04 的 HWE 6.5／6.8 等）的 x86 主機被算成裝了 `linux-riscv`：CVE 頁多出 `linux-riscv`「尚無修正／受影響」，還有拿 riscv 的修正版本比出來的假「待更新」（例如 `6.8.0-60.63 → 6.8.0-60.63.1`）
+- 現在 `linux-riscv*` 的套件名稱裡沒有 `riscv` 字樣的，匯入時不記成 riscv：主機上的同名套件照 `linux`／`linux-hwe-*` 比對，OSV 只有 riscv 列出的 ABI 用同系列推回 `linux`。真正的 RISC-V 主機會照一般 kernel 比對。另外，同一個套件名稱同時屬於 `linux`／`linux-hwe-*` 和其他 kernel 變體時，一律對到前者
+- 更新後啟動時，用保存目錄裡的 OSV 檔自動重新匯入一次（資料格式版本 5，約需數分鐘）；保存目錄沒有那份檔案時，畫面會提醒到資料匯入頁重新上傳
+- 重新匯入後的第一次同步，之前對錯產生的比對結果直接刪除（log 記錄每台刪了幾筆），不會變成「已修正」；同一個 CVE 也影響 `linux` 的，保留原本的第一次發現時間
+
+程式碼審查後的其他修正：
+- image 裡的程式一律讓容器帳號可讀，安裝／更新時 `config/` 讓容器帳號可以進入（不能列出內容）。0.9.12 起複製程式不沿用原本的權限，改由 root 的 umask 決定；主機做過 CIS 強化（umask 027／077）時程式檔變成 600，容器帳號讀不到，安裝時的自動測試失敗、無法啟動；`config/` 是 700 時容器開不到裡面的檔案。自己放進 `config/` 的檔案要讓 UID 10001 讀得到（README 的範例改用 `install`）；其他檔案（`docker-compose.override.yml` 等）維持原本的權限
+- 比對時只略過主機資料造成的錯誤（格式不對的版本字串）。資料庫、磁碟或程式的錯誤整次同步算失敗，`/healthz` 回報 `last_sync_failed`；之前一律當成單一主機的問題略過，同步仍算成功，監控看不出來
+- Landscape 回傳 0 台時，清單匯入建立、還沒連到 Landscape 的主機也不停用（例如剛從 `HOST_SOURCE=file` 改成 `landscape`）
+- 依名稱接續清單匯入的主機、kernel API 沒有它的資料時，清單裡的 kernel 要在 `KERNEL_API_MAX_AGE_HOURS` 內才沿用（和 kernel API 查詢失敗時相同）
+- `/healthz` 依最後一次「完成」的同步判斷 `last_sync_failed`／`hosts_not_evaluated`：之前同步執行中這兩項會暫時消失
+- `.env.example`：`LANDSCAPE_MAX_DROP_PERCENT` 補上「啟用中 4 台以上才檢查百分比」
+- 版本比較的數字段和 dpkg 一樣逐位比較：之前轉成整數，超過 4300 位時出錯。epoch 也逐位比較；超過 2147483647 的 epoch dpkg 判定不合法，cvehub 照樣比較（Ubuntu 的套件不會出現）
+
+## 0.9.12
+程式碼審查後的第二批修正：安裝目錄的擁有者與權限、回復時的資料保護。更新時自動套用到已安裝的目錄：
+- 安裝目錄、程式、腳本、`docker-compose.yml`、`docker-compose.override.yml` 改歸 root 且其他帳號不能寫入。之前照原樣複製，zip 是一般帳號解開的話，這些檔案（包含之後用 sudo 執行的 `install.sh`、`scripts/upgrade.sh`）會歸那個帳號，它不用 sudo 就能改
+- `.env` 一律 600（很早以前手動安裝的可能是 644，裡面有 Landscape 的 secret）
+- `data/` 拿掉「其他人」的權限（750）：之前主機上任何帳號都讀得到資料庫（密碼雜湊、稽核紀錄、全部主機的弱點）與報表。**有其他帳號直接讀 `data/reports/`、或放檔到 `data/hosts-inbox/` 的，更新後要改用 sudo，或自己把那個帳號加進有權限的群組**
+- 回復（`--rollback`）還原資料庫前，先把目前的資料庫另存到 `backups/<時間>-pre-rollback/`；存不下來就不還原。確認前顯示備份的時間。之前直接覆蓋，選到較舊的備份或後面的步驟失敗時，較新的帳號、例外、稽核紀錄就沒了（拿回來的方法見 README 6.2）
+- 回復時資料庫先寫成暫存檔再改名，中斷不會留下寫一半的資料庫
+- 回復不再把 `docker-compose.override.yml` 還原成備份時的內容（和 `.env`、`config/` 一樣保留現在的）
+- install.sh 的測試與資料庫訊息記錄檔改用隨機檔名（之前是 `/tmp` 下固定的檔名，其他帳號可以預先建立或換成連結）
+- 從舊版更新時，安裝目錄裡 data、config、backups 以外的全部項目都改歸 root（不只程式清單裡的；舊版安裝留下的 `.github/`、`requirements-dev.txt` 等也是）
+- 回復前另存的資料庫（`-pre-rollback`）和更新的備份分開計算份數，各留最近 5 份：另存的不能拿來 `--rollback`，一起算的話多做幾次回復就會把能用的更新備份擠掉
+- 有主機比對失敗、維持上次結果時，`/healthz` 回報 `hosts_not_evaluated`（之前只寫在同步紀錄的訊息欄，同步仍算成功，監控看不出來）
+
+## 0.9.11
+程式碼審查後的第一批修正：資料來源異常時弱點被誤標成「已解決」、kernel 套件漏比、同步卡住。更新後第一次同步，下列情況原本漏掉的 kernel 弱點會出現在「新增」裡：
+- kernel 資料過期（`stale`）或沒有這台的資料（`missing`）時，沿用上一次可信的執行中 kernel 比對，最多 `KERNEL_KEEP_DAYS` 天（新設定，預設 7，從那份資料的收集時間算；kernel API 回報換了 kernel 時不沿用）。之前會立刻改用「最新安裝的 kernel」，執行中舊 kernel 的弱點被標成已解決。超過天數才改用已安裝的 kernel，照實際結果更新
+- 沒有執行中 kernel 資料時判斷「舊 kernel」：只和同系列、同 flavour 的 `linux-image` 比。之前只要裝了 ABI 編號較大的 headers／tools、或別的 flavour（例如 azure 的 tools），唯一的 kernel 就被當成舊的略過
+- 已安裝 kernel 的 ABI 名稱沒有出現在 OSV 時，和執行中的 kernel 一樣用同系列推回 source 套件（之前完全不比對）；執行中的 kernel 在 OSV 裡對不到任何套件時（自己編的 kernel 等）改檢查已安裝的 kernel 並在 log 提示，不再整台沒有 kernel 弱點
+- Landscape 回傳 0 台，或比啟用中的少超過 `LANDSCAPE_MAX_DROP_PERCENT`（新設定，預設 50，啟用中 4 台以上才檢查）時，同步失敗、不停用主機；真的一次下架很多台時暫時調高再同步
+- Landscape 回報某台沒有任何已安裝套件、而上次有：沿用上次的套件清單並在 log 提示，不把這台的弱點全部解決
+- 版本字串含「²」「①」這類非 ASCII 數字時版本比對會無窮迴圈，同步卡住且之後每次都被略過：已修正（cvetrack 同）
+- 單一主機比對失敗（例如 Landscape 回報格式不對的版本）不再讓整次同步失敗：那台維持上次的結果，同步紀錄的訊息欄列出主機
+- 背景同步連不上資料庫時沒有放開鎖，之後的同步都顯示「執行中」直到重啟：已修正
+- Ansible 收集主機清單的 playbook 加上 `pipefail`：`dpkg-query` 中途失敗時該主機算失敗，不再送出不完整的套件清單
+
 ## 0.9.10
 - 放檔目錄（`data/inbox`、`data/vex-inbox`、`data/hosts-inbox`）在 cvehub 啟動時建立：之前只有從網頁上傳過檔案才會出現，全新安裝後照 README 直接把主機清單 CSV 放進 `data/hosts-inbox/` 會找不到目錄。已安裝的更新後重啟就會補上
 - 這些目錄請不要自己用 root 建立：容器以 UID 10001 執行，對目錄沒有寫入權就無法把處理完的檔案移到 archive 目錄，同步每次都會失敗。啟動時發現無法寫入會在容器 log 提示。之前已經用 root 建立的，用 `sudo chown -R 10001 /opt/cvehub/data/{inbox,vex-inbox,hosts-inbox}`（路徑換成實際的安裝目錄）改回來

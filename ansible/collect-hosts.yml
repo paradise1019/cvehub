@@ -32,7 +32,7 @@
 
     - name: 產生這台主機的 CSV（連不上或失敗的主機會略過，最後列出）
       ansible.builtin.shell: |
-        set -eu
+        set -euo pipefail                                         # pipefail：dpkg-query 中途失敗時不能把不完整的套件清單當成成功
         export LC_ALL=C
         . /etc/os-release
         release="${VERSION_ID:-}"

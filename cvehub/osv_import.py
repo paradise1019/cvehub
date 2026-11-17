@@ -8,7 +8,7 @@ import shutil
 import tarfile
 
 from .config import Config
-from .kernel import kernel_variant
+from .kernel import ambiguous_variant_binary, kernel_variant
 from .util import CONTENT_ERRORS, archive_name, prune_archive, now as _now, sha256_file as _sha256
 
 log = logging.getLogger(__name__)
@@ -60,7 +60,8 @@ def iter_osv(path, releases):
                 bins = {b["binary_name"]: b.get("binary_version", "")
                         for b in a.get("ecosystem_specific", {}).get("binaries", [])}
                 for b in bins:
-                    yield "binmap", (eco, b, src)
+                    if not ambiguous_variant_binary(src, b):     # linux-riscv 的 linux-image-*-generic 等和 x86 同名：不記
+                        yield "binmap", (eco, b, src)
                 fixed = introduced = None
                 for rng in a.get("ranges", []):
                     for ev in rng.get("events", []):
@@ -81,13 +82,16 @@ def iter_osv(path, releases):
 
 SQL = {"vuln": "INSERT OR REPLACE INTO vuln(cve,priority,cvss,published,details) VALUES (?,?,?,?,?)",
        "affected": "INSERT INTO affected(ecosystem,source,cve,fixed,introduced,binaries) VALUES (?,?,?,?,?,?)",
-       "binmap": "INSERT OR IGNORE INTO binmap(ecosystem,binary,source) VALUES (?,?,?)",
+       # 同一個 binary 名稱同時屬於 linux／linux-hwe-* 和 kernel 變體時一律對到前者（OSV 沒寫架構；riscv 已在 iter_osv 排除，
+       # 這裡防其他變體以後也用同樣的名稱）；其他重複照舊，先匯入的優先
+       "binmap": "INSERT INTO binmap(ecosystem,binary,source) VALUES (?,?,?) ON CONFLICT(ecosystem,binary) DO UPDATE "
+                 "SET source=excluded.source WHERE kernel_variant(binmap.source) AND NOT kernel_variant(excluded.source)",
        "usn": "INSERT OR REPLACE INTO usn_fix(cve,ecosystem,source,fixed,usn,published) VALUES (?,?,?,?,?,?)"}
 BATCH = 50000
 # 資料格式版本：匯入內容有變時加一，舊資料庫會用保存的 OSV 檔自動重匯
 # 1＝0.4.0 加 details；2＝0.5.0 收錄所有 CVE（含沒有指定版本套件的）；3＝0.7.0 加 USN 修正日期；
-# 4＝0.7.1 沒有日期的 USN 不再蓋掉有日期的
-FORMAT = 4
+# 4＝0.7.1 沒有日期的 USN 不再蓋掉有日期的；5＝0.9.13 riscv kernel 和 x86 同名的 binary 不記、同名時 linux 優先
+FORMAT = 5
 
 
 def import_file(con, path):
@@ -100,6 +104,7 @@ def import_file(con, path):
         counts = {"vuln": 0, "affected": 0, "binmap": 0, "usn": 0}
         buf = {k: [] for k in SQL}
         first_fix = {}       # (cve, ecosystem, source) -> 最早的 USN（同一個 CVE 常被好幾個 USN 列到）
+        con.create_function("kernel_variant", 1, lambda src: int(kernel_variant(src)), deterministic=True)
         with con:  # 單一交易：失敗會整批回復
             con.execute("DELETE FROM affected")
             con.execute("DELETE FROM vuln")

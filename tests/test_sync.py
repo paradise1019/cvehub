@@ -596,13 +596,13 @@ class LandscapeContinuesFileHostTest(unittest.TestCase):
         """第一次 Landscape 同步時還沒加入、被停用的清單主機，之後加入 Landscape：30 天內出現過的照樣接續"""
         c = self.env.con
         hid = self.file_host()
-        with self.landscape([], {}):
+        with self.landscape([{"id": 9, "hostname": "other01", "title": "other01", "distribution": "24.04"}], {9: {"curl": "1"}}):
             sync.sync_hosts(c)                                                  # 這次沒出現：被停用
         self.assertEqual(c.execute("SELECT active FROM host WHERE id=?", (hid,)).fetchone()[0], 0)
         with self.landscape([{"id": 7, "hostname": "web01", "title": "web01", "distribution": "24.04"}], {7: {"openssl": "1"}}):
             sync.sync_hosts(c)
         self.assertEqual(tuple(c.execute("SELECT landscape_id, active FROM host WHERE id=?", (hid,)).fetchone()), (7, 1))
-        self.assertEqual(c.execute("SELECT COUNT(*) FROM host").fetchone()[0], 1)
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM host WHERE landscape_id IS NOT 9").fetchone()[0], 1)    # 沒有另建一筆 web01
 
     def test_inactive_file_host_not_continued(self):
         """太久沒出現的舊清單主機：不讓同名的新機器接走（舊弱點會被重新打開）"""
@@ -1060,3 +1060,314 @@ class HostMatchKeyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FalseNegativeTest(unittest.TestCase):
+    """0.9.11：資料來源異常時不能把弱點變成已解決、kernel 套件不能漏比"""
+
+    def setUp(self):
+        self.env = TempEnv().__enter__()
+        osv_import.import_file(self.env.con, make_osv_tar(os.path.join(self.env.dir.name, "o.tar.xz"), RECORDS))
+
+    def tearDown(self):
+        self.env.__exit__()
+
+    def landscape(self, comps, pk):
+        from unittest import mock
+        ls = mock.Mock()
+        ls.computers.return_value = comps
+        ls.installed_packages.return_value = pk
+        return mock.patch.object(sync, "Landscape", return_value=ls)
+
+    def comp(self, i):
+        return {"id": i, "hostname": "h%d.example.com" % i, "title": "h%d" % i, "distribution": "24.04"}
+
+    def test_stale_or_missing_kernel_data_keeps_running_kernel_findings(self):
+        from unittest import mock
+        from cvehub.config import Config
+        c = self.env.con
+        saved = Config.KERNEL_API_URL, Config.KERNEL_API_MODE
+        Config.KERNEL_API_URL, Config.KERNEL_API_MODE = "http://k/?h={hostname}", "per-host"
+        try:
+            pk = {"linux-image-6.8.0-139-generic": "6.8.0-139.139", "linux-image-6.8.0-147-generic": "6.8.0-147.147"}
+            ok = {"release": "6.8.0-139-generic", "version": "6.8.0-139.139", "collected_at": sync.now()}
+            old = dict(ok, collected_at="2020-01-01T00:00:00")
+            for answer, status in ((old, "stale"), (None, "missing")):
+                with self.landscape([self.comp(1)], pk), mock.patch.object(sync, "kernel_for_host", return_value=ok):
+                    sync.sync_hosts(c)
+                h = c.execute("SELECT * FROM host").fetchone()
+                sync.update_findings(c, h, sync.evaluate_host(c, h))
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM finding WHERE location='running-kernel' AND resolved_at IS NULL").fetchone()[0], 1)
+                with self.landscape([self.comp(1)], pk), mock.patch.object(sync, "kernel_for_host", return_value=answer):
+                    sync.sync_hosts(c)
+                h = c.execute("SELECT * FROM host").fetchone()
+                self.assertEqual(h["kernel_status"], status)
+                self.assertEqual(sync.update_findings(c, h, sync.evaluate_host(c, h))[1], 0, status)     # 不會變成已解決
+        finally:
+            Config.KERNEL_API_URL, Config.KERNEL_API_MODE = saved
+
+    def test_kept_kernel_no_duplicate_and_expires(self):
+        """stale／missing：沿用上一次的執行中 kernel（不會和已安裝套件的同一個 CVE 重複）；超過 KERNEL_KEEP_DAYS 不再沿用，
+        修好的主機弱點會解決（不會永遠留著）；kernel API 回報換了 release 時不沿用"""
+        import datetime
+        from unittest import mock
+        from cvehub.config import Config
+        c = self.env.con
+        saved = Config.KERNEL_API_URL, Config.KERNEL_API_MODE
+        Config.KERNEL_API_URL, Config.KERNEL_API_MODE = "http://k/?h={hostname}", "per-host"
+
+        def step(pk, answer):
+            with self.landscape([self.comp(1)], pk), mock.patch.object(sync, "kernel_for_host", return_value=answer):
+                sync.sync_hosts(c)
+            h = c.execute("SELECT * FROM host").fetchone()
+            sync.update_findings(c, h, sync.evaluate_host(c, h))
+            return h, sorted((r["package"], r["location"]) for r in c.execute(
+                "SELECT package, location FROM finding WHERE cve='CVE-2026-0005' AND resolved_at IS NULL"))
+        try:
+            pk = {"linux-image-6.8.0-139-generic": "6.8.0-139.139"}
+            fixed = {"linux-image-6.8.0-999-generic": "6.8.0-999.999"}
+            ok = {"release": "6.8.0-139-generic", "version": "6.8.0-139.139", "collected_at": sync.now()}
+            running = [("kernel 6.8.0-139-generic", "running-kernel")]
+            for answer in (dict(ok, collected_at="2020-01-01T00:00:00"), None):
+                c.execute("DELETE FROM finding")
+                c.commit()
+                self.assertEqual(step(pk, ok)[1], running)
+                h, rows = step(pk, answer)
+                self.assertEqual((h["kernel_release"], rows), ("6.8.0-139-generic", running))      # 沿用、不重複
+                self.assertEqual(step(fixed, answer)[1], running)     # 沿用期間：還看不出是否已重開
+                old = (datetime.datetime.now() - datetime.timedelta(days=8)).isoformat(timespec="seconds")
+                c.execute("UPDATE host SET kernel_collected_at=?", (old,))
+                c.commit()
+                h, rows = step(fixed, answer)
+                self.assertEqual((h["kernel_release"], rows), (None, []))                           # 超過 7 天：照已安裝的判斷
+            self.assertEqual(step(pk, ok)[1], running)
+            h, rows = step(pk, dict(ok, release="6.8.0-147-generic", collected_at="2020-01-01T00:00:00"))
+            self.assertIsNone(h["kernel_release"])                                                   # API 說換了 kernel：不沿用
+            self.assertEqual(rows, [("linux-image-6.8.0-139-generic", "installed")])
+        finally:
+            Config.KERNEL_API_URL, Config.KERNEL_API_MODE = saved
+
+    def test_only_image_of_same_flavour_makes_a_kernel_old(self):
+        c = self.env.con
+        img = {"linux-image-6.8.0-139-generic": "6.8.0-139.139"}
+        for i, extra in enumerate(({"linux-headers-6.8.0-147-generic": "6.8.0-147.147"},
+                                   {"linux-tools-6.8.0-1040-azure": "6.8.0-1040.46"},
+                                   {"linux-image-6.8.0-147-lowlatency": "6.8.0-147.147"})):
+            res = sync.evaluate_host(c, add_host(c, dict(img, **extra), "f%d.example.com" % i))
+            self.assertIn(("CVE-2026-0005", "linux-image-6.8.0-139-generic", "installed"), res, extra)
+        self.assertEqual(sync._old_kernels({"linux-image-6.8.0-139-generic": "1", "linux-image-6.8.0-147-generic": "1",
+                                            "linux-headers-6.8.0-139": "1", "linux-modules-6.8.0-139-generic": "1"}),
+                         {"linux-image-6.8.0-139-generic", "linux-headers-6.8.0-139", "linux-modules-6.8.0-139-generic"})
+
+    def test_installed_kernel_abi_not_in_osv(self):
+        """已安裝 kernel 的 ABI 名稱沒出現在 OSV：和執行中的一樣用同系列推回 source"""
+        c = self.env.con
+        res = sync.evaluate_host(c, add_host(c, {"linux-image-6.8.0-120-generic": "6.8.0-120.120"}), {})
+        self.assertIn(("CVE-2026-0005", "linux-image-6.8.0-120-generic", "installed"), res)
+
+    def test_unmappable_running_kernel_falls_back_to_installed(self):
+        c = self.env.con
+        h = add_host(c, {"linux-image-6.8.0-139-generic": "6.8.0-139.139"},
+                     kernel={"release": "6.99.0-1-custom", "version": "6.99.0-1.1", "status": "ok"})
+        with self.assertLogs("cvehub.sync", "WARNING"):
+            res = sync.evaluate_host(c, h)
+        self.assertIn(("CVE-2026-0005", "linux-image-6.8.0-139-generic", "installed"), res)
+
+    def test_landscape_empty_or_shrunken_result_fails_sync(self):
+        from cvehub.config import Config
+        c = self.env.con
+        pk = {"openssl": "3.0.13-0ubuntu3"}
+        with self.landscape([self.comp(i) for i in range(1, 5)], pk):
+            sync.sync_hosts(c)
+        for comps in ([], [self.comp(1)]):
+            with self.landscape(comps, pk), self.assertRaises(RuntimeError):
+                sync.sync_hosts(c)
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM host WHERE active=1").fetchone()[0], 4)
+        with self.landscape([self.comp(1), self.comp(2)], pk):                  # 少一半：沒超過 50%，照常停用
+            sync.sync_hosts(c)
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM host WHERE active=1").fetchone()[0], 2)
+        saved, Config.LANDSCAPE_MAX_DROP_PERCENT = Config.LANDSCAPE_MAX_DROP_PERCENT, 0
+        try:
+            with self.landscape([self.comp(1)], pk):
+                sync.sync_hosts(c)                                              # 0＝只擋 0 台
+        finally:
+            Config.LANDSCAPE_MAX_DROP_PERCENT = saved
+
+    def test_empty_package_list_keeps_previous_packages(self):
+        c = self.env.con
+        with self.landscape([self.comp(1)], {"openssl": "3.0.13-0ubuntu3"}):
+            sync.sync_hosts(c)
+        h = c.execute("SELECT * FROM host").fetchone()
+        self.assertEqual(sync.update_findings(c, h, sync.evaluate_host(c, h)), (2, 0))
+        with self.landscape([self.comp(1)], {}), self.assertLogs("cvehub.sync", "WARNING"):
+            sync.sync_hosts(c)
+        h = c.execute("SELECT * FROM host").fetchone()
+        self.assertEqual(h["package_count"], 1)
+        self.assertEqual(sync.update_findings(c, h, sync.evaluate_host(c, h)), (0, 0))
+
+    def test_one_bad_host_does_not_fail_the_sync(self):
+        from cvehub.config import Config
+        c = self.env.con
+        saved, Config.HOST_SOURCE = Config.HOST_SOURCE, "file"
+        try:
+            add_host(c, {"openssl": "x:1"}, "bad.example.com")                  # epoch 不是數字：vercmp 丟例外
+            add_host(c, {"openssl": "3.0.13-0ubuntu3"}, "good.example.com")
+            rid = sync.run_sync(c)
+        finally:
+            Config.HOST_SOURCE = saved
+        r = c.execute("SELECT * FROM sync_run WHERE id=?", (rid,)).fetchone()
+        self.assertEqual((r["status"], r["new_findings"]), ("ok", 2))
+        self.assertIn("bad", r["message"])
+
+    def test_only_host_data_errors_are_skipped(self):
+        """只略過主機資料的錯誤（vercmp.BadVersion）：只有一台、資料有問題時照常算成功（hosts_not_evaluated）；
+        資料庫、磁碟、程式的錯誤整次同步算失敗（/healthz 回報 last_sync_failed）"""
+        import sqlite3
+        from unittest import mock
+        from cvehub.config import Config
+        c = self.env.con
+        saved, Config.HOST_SOURCE = Config.HOST_SOURCE, "file"
+        try:
+            add_host(c, {"openssl": "x:1"}, "bad.example.com")                  # 只有這一台
+            r = c.execute("SELECT * FROM sync_run WHERE id=?", (sync.run_sync(c),)).fetchone()
+            self.assertEqual(r["status"], "ok")
+            self.assertIn("bad", r["message"])
+            add_host(c, {"openssl": "3.0.13-0ubuntu3"}, "good.example.com")
+            for target in ("update_findings", "evaluate_host"):
+                for err in (sqlite3.OperationalError("database is locked"), sqlite3.DatabaseError("database disk image is malformed"),
+                            OSError(28, "No space left on device"), KeyError("x"), ValueError("not enough values to unpack")):
+                    with mock.patch.object(sync, target, side_effect=err), self.assertRaises(type(err)):
+                        sync.run_sync(c)
+                    self.assertEqual(c.execute("SELECT status FROM sync_run ORDER BY id DESC").fetchone()[0], "failed", (target, err))
+        finally:
+            Config.HOST_SOURCE = saved
+
+    def test_landscape_empty_result_protects_list_hosts(self):
+        """還沒連到 Landscape 的清單匯入主機（剛從 HOST_SOURCE=file 改過來）：Landscape 回 0 台時也不能全部停用"""
+        c = self.env.con
+        add_host(c, {"openssl": "3.0.13-0ubuntu3"}, "web01")
+        c.execute("UPDATE host SET landscape_id=NULL")
+        c.commit()
+        with self.landscape([], {}), self.assertRaises(RuntimeError):
+            sync.sync_hosts(c)
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM host WHERE active=1").fetchone()[0], 1)
+
+    def test_list_host_kernel_kept_only_if_fresh(self):
+        """依名稱接續的清單匯入主機、kernel API 沒有它的資料（missing）：清單裡的 kernel 要沒過期才沿用（和查詢失敗時相同）"""
+        import datetime
+        from unittest import mock
+        from cvehub import host_import
+        from cvehub.config import Config
+        c = self.env.con
+        saved = Config.KERNEL_API_URL, Config.KERNEL_API_MODE
+        Config.KERNEL_API_URL, Config.KERNEL_API_MODE = "http://k/?h={hostname}", "per-host"
+        try:
+            for age_h, kept in ((100, False), (1, True)):
+                c.execute("DELETE FROM host_package")
+                c.execute("DELETE FROM host")
+                c.commit()
+                host_import.apply(c, host_import.parse(
+                    "hostname,release,package,version\nh1,24.04,linux-image-6.8.0-139-generic,6.8.0-139.139\n"))
+                t = (datetime.datetime.now() - datetime.timedelta(hours=age_h)).isoformat(timespec="seconds")
+                c.execute("UPDATE host SET kernel_release='6.8.0-139-generic', kernel_version='6.8.0-139.139', "
+                          "kernel_collected_at=?, kernel_status='ok'", (t,))
+                c.commit()
+                with self.landscape([self.comp(1)], {"linux-image-6.8.0-139-generic": "6.8.0-139.139"}), \
+                        mock.patch.object(sync, "kernel_for_host", return_value=None):
+                    sync.sync_hosts(c)
+                h = c.execute("SELECT * FROM host WHERE active=1").fetchone()
+                self.assertEqual((h["landscape_id"], h["kernel_status"]), (1, "missing"))
+                self.assertEqual(h["kernel_collected_at"] == t, kept, age_h)
+        finally:
+            Config.KERNEL_API_URL, Config.KERNEL_API_MODE = saved
+
+
+class KernelNameCollisionTest(unittest.TestCase):
+    """linux-riscv 的 binary 和 x86 的 linux 同名（linux-image-6.8.0-60-generic，OSV 沒寫架構）：
+    x86 主機不能被算成 linux-riscv（多出「尚無修正」、拿 riscv 的修正版本比出假的「待更新」）"""
+    K = "6.8.0-60-generic"
+    BINS = {"linux-image-6.8.0-60-generic": "", "linux-modules-6.8.0-60-generic": ""}
+
+    def setUp(self):
+        from tests.helpers import E, osv_record
+        self.env = TempEnv(INCLUDE_UNFIXED=True).__enter__()
+        riscv_bins = dict(self.BINS, **{"linux-riscv-headers-6.8.0-60": ""})
+        self.records = [
+            # 只影響 riscv 的 CVE 排在最前面（舊版：先匯入的對應優先 → 同名 binary 被對到 linux-riscv）
+            osv_record("CVE-2026-0101", [(E, "linux-riscv", "6.8.0-60.63.1", riscv_bins), (E, "linux", "6.8.0-60.63", self.BINS)]),
+            osv_record("CVE-2026-0102", [(E, "linux-riscv", None, riscv_bins), (E, "linux", "6.8.0-87.88", self.BINS)]),
+        ]
+        self.tar = make_osv_tar(os.path.join(self.env.dir.name, "o.tar.xz"), self.records)
+        osv_import.import_file(self.env.con, self.tar)
+
+    def tearDown(self):
+        self.env.__exit__()
+
+    def host(self):
+        return add_host(self.env.con, {"linux-image-" + self.K: "6.8.0-60.63", "linux-modules-" + self.K: "6.8.0-60.63"},
+                        kernel={"release": self.K, "version": "6.8.0-60.63", "status": "ok"})
+
+    def test_binmap_prefers_linux(self):
+        c = self.env.con
+        src = dict(c.execute("SELECT binary, source FROM binmap"))
+        self.assertEqual(src["linux-image-" + self.K], "linux")
+        self.assertEqual(src["linux-modules-" + self.K], "linux")
+        self.assertEqual(src["linux-riscv-headers-6.8.0-60"], "linux-riscv")      # riscv 專用的名稱照舊
+
+    def test_x86_host_not_riscv(self):
+        from cvehub import period
+        c = self.env.con
+        h = self.host()
+        res = sync.evaluate_host(c, h)
+        self.assertEqual({(k[0], v["source"], v["status"]) for k, v in res.items()},
+                         {("CVE-2026-0102", "linux", "fix-available")})            # 0101：linux 已修正，不是 riscv 的待更新
+        self.assertNotIn("linux-riscv", period.host_sources(c)[h["id"]][1])
+
+    def test_old_wrong_findings_deleted_not_resolved(self):
+        """舊版對錯的比對結果：更新後刪掉，不算「已修正」；同一個 CVE 也影響 linux 的保留原本的 first_seen"""
+        c = self.env.con
+        with c:
+            c.execute("UPDATE binmap SET source='linux-riscv' WHERE binary IN (?,?)", tuple(self.BINS))   # 模擬舊版的對應
+        h = self.host()
+        sync.update_findings(c, h, sync.evaluate_host(c, h))
+        rows = {r["cve"]: (r["source"], r["first_seen"]) for r in c.execute("SELECT * FROM finding")}
+        self.assertEqual(rows["CVE-2026-0101"][0], "linux-riscv")
+        with c:
+            c.execute("UPDATE finding SET first_seen='2026-01-01T00:00:00'")
+        osv_import.import_file(c, self.tar)                                     # 新版匯入（FORMAT 改版時自動重匯）
+        self.assertEqual(sync.update_findings(c, h, sync.evaluate_host(c, h)), (0, 0))   # 不是新增、也不是已解決
+        rows = {r["cve"]: (r["source"], r["first_seen"], r["resolved_at"]) for r in c.execute("SELECT * FROM finding")}
+        self.assertEqual(rows, {"CVE-2026-0102": ("linux", "2026-01-01T00:00:00", None)})
+
+    def test_abi_only_listed_by_riscv(self):
+        """OSV 只有 linux-riscv 列出這個 ABI（linux 的 binary 清單只有當過修正版本的 ABI）：用同系列推回 linux，不是 riscv"""
+        from tests.helpers import E, osv_record
+        c = self.env.con
+        rec = self.records + [osv_record("CVE-2026-0104", [(E, "linux-riscv", "6.8.0-53.55.1", {"linux-image-6.8.0-53-generic": ""}),
+                                                           (E, "linux", "6.8.0-87.88", {"linux-image-6.8.0-87-generic": ""})])]
+        osv_import.import_file(c, make_osv_tar(os.path.join(self.env.dir.name, "o2.tar.xz"), rec))
+        self.assertIsNone(c.execute("SELECT 1 FROM binmap WHERE binary='linux-image-6.8.0-53-generic'").fetchone())
+        h = add_host(c, {"linux-image-6.8.0-53-generic": "6.8.0-53.55"},
+                     kernel={"release": "6.8.0-53-generic", "version": "6.8.0-53.55", "status": "ok"})
+        self.assertEqual({v["source"] for v in sync.evaluate_host(c, h).values()}, {"linux"})
+
+    def test_old_hwe_generic_names_kept(self):
+        """舊版本的 linux-hwe／linux-lts-* 也用 -generic 名稱，但它們是 x86 的 HWE kernel：對應照舊"""
+        from cvehub.kernel import ambiguous_variant_binary
+        self.assertFalse(ambiguous_variant_binary("linux-hwe", "linux-image-5.0.0-65-generic"))
+        self.assertFalse(ambiguous_variant_binary("linux-lts-xenial", "linux-image-4.4.0-210-generic"))
+        self.assertTrue(ambiguous_variant_binary("linux-riscv-6.14", "linux-image-6.14.0-36-generic"))
+        self.assertFalse(ambiguous_variant_binary("linux-riscv", "linux-riscv-headers-6.8.0-60"))
+
+    def test_real_variant_findings_kept(self):
+        """真的裝了變體（名稱不和 linux 撞）的已解決紀錄不受影響"""
+        from tests.helpers import E, osv_record
+        c = self.env.con
+        rec = self.records + [osv_record("CVE-2026-0103", [(E, "linux-aws", "6.8.0-1042.44", {"linux-image-6.8.0-1040-aws": ""})])]
+        osv_import.import_file(c, make_osv_tar(os.path.join(self.env.dir.name, "o2.tar.xz"), rec))
+        pk = {"linux-image-6.8.0-1040-aws": "6.8.0-1040.42"}
+        h = add_host(c, pk, "aws.example.com")
+        self.assertEqual(sync.update_findings(c, h, sync.evaluate_host(c, h)), (1, 0))
+        c.execute("UPDATE host_package SET version='6.8.0-1042.44' WHERE host_id=?", (h["id"],))
+        self.assertEqual(sync.update_findings(c, h, sync.evaluate_host(c, h)), (0, 1))   # 已修正，照舊記錄
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM finding WHERE resolved_at IS NOT NULL").fetchone()[0], 1)

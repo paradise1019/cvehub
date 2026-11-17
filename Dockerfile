@@ -23,6 +23,9 @@ RUN if ls wheels/*.whl >/dev/null 2>&1; then \
 
 COPY cvehub ./cvehub
 COPY tests ./tests
+# 程式要讓容器帳號（下面的 cvehub，UID 10001）讀得到：COPY 保留主機上的權限，主機做過 CIS 強化（root 的 umask 027／077）時
+# 解出來的檔案別人讀不到，容器與測試都會失敗
+RUN chmod -R a+rX /app
 # 程式指紋（cvehub/＋requirements.txt＋Dockerfile 的 sha256，由 scripts/upgrade.sh 建置時帶入）：
 # 回復時用來確認沿用的 image 就是那份程式建的；自己 build 沒帶就是空的，回復時一律重建
 ARG CODE_FP=
