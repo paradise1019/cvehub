@@ -12,6 +12,7 @@ import urllib.request
 
 from . import hostnames
 from .config import Config
+from .util import parse_time as _parse_time
 
 log = logging.getLogger(__name__)
 
@@ -95,6 +96,7 @@ def primary_ip(computer):
 def host_key(name):
     if not name:
         return ""
+    name = name.rstrip(".")                 # web01.example.com. 與 web01.example.com 相同
     if Config.HOST_MATCH_KEY == "shortname":
         name = hostnames.short(name)
     return name.lower() if Config.HOST_MATCH_CASE_INSENSITIVE else name
@@ -163,12 +165,71 @@ def _same_origin(base, url):
     return b.geturl()
 
 
+class KernelIndex:
+    """bulk 模式的 kernel 資料，依主機查（get）。同一個比對值（短名稱、IP）可能有好幾筆：
+    web01.a.example.com 和 web01.b.example.com 是兩台。之前後面那筆直接蓋掉前面的，兩台拿到同一個 kernel，
+    還跑著舊 kernel 的那台會被當成已重開機（執行中 kernel 的弱點變成已解決）"""
+
+    def __init__(self):
+        self.by_key = {}            # 比對值 → [(API 的主機名稱, 紀錄)]
+
+    def add(self, name, rec):
+        """加入一筆；比對值是空的（名稱只有「.」之類）時不加，回傳 False"""
+        k = name if Config.HOST_MATCH_KEY == "ip" else host_key(name)
+        if k:
+            self.by_key.setdefault(k, []).append((name, rec))
+        return bool(k)
+
+    def get(self, hostname, ip, same_key=1, same_name=1):
+        """回傳 (紀錄或 None, 分不出來的原因或 None)。
+        same_key／same_name：這次 Landscape 有幾台電腦的比對值相同／完整名稱完全相同（含這台）。規則：
+          1. 名稱完全相同的電腦有兩台以上（複製的 VM 沒改名）：分不出來
+          2. kernel API 有名稱完全相同的紀錄：只用那些
+          3. 沒有：Landscape 有好幾台比對值相同時分不出來；設了 LANDSCAPE_QUERY（只看得到部分電腦，無法確認唯一）時
+             只用和這台是同一台的名稱（只差在有沒有網域）；都不是時用全部候選（短名稱就是識別，跨網域 web01.lan／web01.corp 照樣對得到）
+          4. 候選裡有不同台的名稱（web01.a… 與 web01.b…）而內容不一樣：分不出來；其他取收集時間最新的一筆（重新收集、重新註冊）
+        IP 模式：Landscape 有好幾台是同一個 IP 時分不出來，其他取最新的一筆。
+        名稱的比較（完全相同、是不是同一台）一律不分大小寫、不看結尾的點（hostnames.norm：DNS 名稱本來就不分大小寫）；
+        HOST_MATCH_CASE_INSENSITIVE 只影響比對值（分組；shortname 模式是第一段、hostname 模式是完整名稱）：設成 false 時
+        比對值只差大小寫的分在不同組，彼此不會成為候選，也不會有 log（Landscape 的 Web01 對不到 kernel API 的 web01）"""
+        cands = self.by_key.get(match_value(hostname, ip), [])
+        if not cands:
+            return None, None
+        want = hostnames.norm(hostname or "")
+        if Config.HOST_MATCH_KEY == "ip":
+            if same_key > 1:
+                return None, "Landscape 有 %d 台電腦的 IP 都是 %s" % (same_key, ip)
+        else:
+            if same_name > 1:
+                return None, "Landscape 有 %d 台電腦都叫 %s（請把複製的電腦改名）" % (same_name, hostname)
+            exact = [(n, r) for n, r in cands if hostnames.norm(n) == want]
+            if exact:
+                cands = exact
+            elif same_key > 1:
+                return None, "Landscape 有 %d 台電腦的比對值相同，kernel API 沒有名稱完全相同的資料" % same_key
+            elif Config.LANDSCAPE_QUERY:
+                cands = [(n, r) for n, r in cands if hostnames.same_machine(n, want)]
+                if not cands:
+                    return None, "設了 LANDSCAPE_QUERY，無法確認 kernel API 裡名稱不同的資料是不是這一台"
+        recs = []
+        for _, r in cands:
+            if r not in recs:
+                recs.append(r)
+        names = {hostnames.norm(n) for n, _ in cands}
+        if len(recs) > 1 and not all(hostnames.same_machine(a, b) for a in names for b in names):
+            shown = sorted(names)
+            return None, "kernel API 有多筆不同電腦的資料：%s%s" % ("、".join(shown[:5]), "…等 %d 個名稱" % len(shown) if len(shown) > 5 else "")
+        # 收集時間相同或沒有時取後面那筆（和之前一樣）
+        return max(reversed(recs), key=lambda r: _parse_time(r.get("collected_at")) or datetime.datetime.min), None
+
+
 def kernel_api():
-    """bulk 模式：回傳 {對應值: {"release","version","collected_at"}}；未設定或 per-host 模式回傳 None"""
+    """bulk 模式：回傳 KernelIndex；未設定或 per-host 模式回傳 None"""
     c = Config
     if not c.KERNEL_API_URL or c.KERNEL_API_MODE == "per-host":
         return None
-    out, url = {}, c.KERNEL_API_URL
+    out, url = KernelIndex(), c.KERNEL_API_URL
+    total = bad = 0
     while url:
         req = urllib.request.Request(url, headers=_auth_headers())
         data = json.load(urllib.request.urlopen(req, context=_ctx(c.KERNEL_API_CA_FILE), timeout=c.KERNEL_API_TIMEOUT))
@@ -180,8 +241,23 @@ def kernel_api():
         else:
             items, url = [dict(v, **{c.KERNEL_API_FIELD_HOST: k}) for k, v in data.items()], None
         for it in items:
-            v = it.get(c.KERNEL_API_FIELD_HOST)
-            k = v if c.HOST_MATCH_KEY == "ip" else host_key(v)
-            if k:
-                out[k] = _record(it)
+            total += 1
+            if not isinstance(it, dict) or c.KERNEL_API_FIELD_HOST not in it:
+                bad += 1            # 不是物件、或沒有主機欄位：格式問題，略過這筆
+                continue
+            v = it[c.KERNEL_API_FIELD_HOST]
+            if v is None or (isinstance(v, str) and not v.strip()):
+                continue            # 主機名稱是空的（還沒填的資料）：和之前一樣略過、不記 log
+            if not isinstance(v, str):
+                bad += 1            # 主機欄位不是文字（物件、數字、true）：略過這筆
+                continue
+            if not out.add(v.strip(), _record(it)):
+                bad += 1            # 名稱算不出比對值（只有「.」、以點開頭的網域…）
+    if total and not out.by_key:
+        # 有資料卻一筆都用不上：多半是格式或 KERNEL_API_FIELD_HOST 設錯。整批失敗（/healthz 回報 kernel_api_error），
+        # 不是悄悄變成每台都沒有 kernel 資料
+        raise ValueError("kernel API 回傳 %d 筆資料，沒有一筆有可用的主機名稱（欄位 %s）：格式不對，或 KERNEL_API_FIELD_HOST 設錯"
+                         % (total, c.KERNEL_API_FIELD_HOST))
+    if bad:
+        log.warning("kernel API 有 %d 筆資料不是物件、沒有主機欄位（%s），或主機名稱不能用：略過", bad, c.KERNEL_API_FIELD_HOST)
     return out

@@ -22,7 +22,7 @@ class TempEnv:
         base = {"DB_PATH": os.path.join(d, "t.sqlite3"), "OSV_INBOX_DIR": os.path.join(d, "inbox"),
                 "OSV_ARCHIVE_DIR": os.path.join(d, "archive"),
                 "VEX_INBOX_DIR": os.path.join(d, "vex-inbox"), "VEX_ARCHIVE_DIR": os.path.join(d, "vex-archive"),
-                "VEX_KEEP_KERNEL_VARIANTS": [], "REPORT_DIR": os.path.join(d, "reports"),
+                "VEX_KEEP_KERNEL_VARIANTS": [], "REPORT_DIR": os.path.join(d, "reports"), "REPORT_KEEP_FILES": 30,
                 "HOST_SOURCE": "landscape", "HOSTS_FILE_MODE": "merge", "HOSTS_KEEP_FILES": 30,
                 "HOSTS_INBOX_DIR": os.path.join(d, "hosts-inbox"), "HOSTS_ARCHIVE_DIR": os.path.join(d, "hosts-archive"),
                 "UBUNTU_RELEASES": ["24.04"], "OSV_MIN_ROWS_PER_RELEASE": 1, "PRO_MODE": "auto",

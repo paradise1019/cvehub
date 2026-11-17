@@ -288,6 +288,7 @@ server {
 | `never_synced`／`sync_too_old`／`last_sync_failed` | 比對從沒成功／太久沒成功／最近失敗 | `sudo docker compose logs --tail 50` |
 | `hosts_not_evaluated` | 最近一次比對有主機失敗，那幾台維持上次的結果（首頁「最近同步」的訊息欄列出主機） | `sudo docker compose logs --tail 200` 找「比對失敗」 |
 | `kernel_api_error` | （接 kernel API 時）查詢失敗，沿用上次的資料 | 檢查 token、對方服務 |
+| `hosts_release_not_compared` | 有主機的 Ubuntu 版本不在 `UBUNTU_RELEASES`，比對不出任何弱點（每一頁上方列出主機） | 要比對就把版本加進 `UBUNTU_RELEASES` 並重新匯入 OSV；刻意不比對的用 `LANDSCAPE_QUERY` 排除（例：只查有某個標籤的電腦），或從主機清單移除 |
 
 清單匯入模式下，排程仍會每天重新比對兩次（`SCHEDULE_SYNC`），沒上傳新清單不會造成 `sync_too_old`。
 

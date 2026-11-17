@@ -292,7 +292,8 @@ def create_app(start_scheduler=True):
                 "job": _status, "version": __version__, "PRIO": PRIO, "cfg": Config,
                 "user": g.get("user"), "role": g.get("role"), "is_admin": g.get("role") == "admin",
                 "role_label": auth.ROLE_LABEL, "csrf_token": _csrf,
-                "site_label": Config.SITE_LABEL, "site_color": site_color() if Config.SITE_LABEL else ""}
+                "site_label": Config.SITE_LABEL, "site_color": site_color() if Config.SITE_LABEL else "",
+                "uncompared": sync.uncompared_hosts(g.con) if "con" in g and g.get("user") else []}
 
     # ------------------------------------------------------------ 登入／帳號
     @app.route("/login", methods=["GET", "POST"])
@@ -651,6 +652,8 @@ def create_app(start_scheduler=True):
             problems.append("hosts_not_evaluated")    # 成功的同步只有在有主機比對失敗時才寫 message（run_sync）
         if c.execute("SELECT 1 FROM host WHERE active=1 AND kernel_status='error' LIMIT 1").fetchone():
             problems.append("kernel_api_error")
+        if sync.uncompared_hosts(c):
+            problems.append("hosts_release_not_compared")     # Ubuntu 版本不在 UBUNTU_RELEASES：比對不出任何弱點
         bad_imp = c.execute("SELECT status FROM osv_import ORDER BY id DESC LIMIT 1").fetchone()
         if bad_imp and bad_imp["status"] == "failed":
             problems.append("last_osv_import_failed")

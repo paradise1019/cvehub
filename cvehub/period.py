@@ -17,7 +17,7 @@ import io
 
 from .config import PRIO
 from .kernel import is_kernel, kernel_variant
-from .sync import KERNEL_ABI, _kernel_source_by_series
+from .sync import select_items
 from .vercmp import vercmp
 from .vex_import import LABEL, LABEL_EN, RANK, STATUSES, UNRESOLVED, status_for
 
@@ -71,26 +71,13 @@ def _desc(cve, text):
 
 
 def host_sources(con):
-    """{host_id: (release, {source})}：用和比對相同的 binary→source 對應"""
-    out = {}
-    for h in con.execute("SELECT id, release FROM host WHERE active=1"):
-        rel = h["release"]
-        ecos = ["Ubuntu:%s:LTS" % rel, "Ubuntu:Pro:%s:LTS" % rel]
-        names = [r["name"] for r in con.execute("SELECT name FROM host_package WHERE host_id=?", (h["id"],))]
-        found, srcs = set(), set()
-        for i in range(0, len(names), 500):
-            chunk = names[i:i + 500]
-            q = "SELECT binary, source FROM binmap WHERE ecosystem IN (%s) AND binary IN (%s)" % (
-                ",".join("?" * len(ecos)), ",".join("?" * len(chunk)))
-            for r in con.execute(q, ecos + chunk):
-                found.add(r["binary"]); srcs.add(r["source"])
-        for n in names:                  # 新版 kernel 還沒出現在 OSV 的 binary 清單時，用同系列推測
-            if n not in found and KERNEL_ABI.match(n):
-                for e in ecos:
-                    s = _kernel_source_by_series(con, e, n)
-                    if s:
-                        srcs.add(s); break
-        out[h["id"]] = (rel, srcs)
+    """{host_id: (release, {source})}：和比對（sync.select_items）看同一批套件——執行中的 kernel 已知時只算它，
+    其他已安裝、沒在執行的 kernel（舊 ABI、停止支援的 HWE）不算，「尚無修正」才不會列出這些 kernel 的弱點"""
+    out, cache = {}, {}
+    for h in con.execute("SELECT * FROM host WHERE active=1").fetchall():
+        pk = {r["name"]: r["version"] for r in con.execute("SELECT name, version FROM host_package WHERE host_id=?", (h["id"],))}
+        _, srcmap, _ = select_items(con, h, pk, cache, quiet=True)
+        out[h["id"]] = (h["release"], set(srcmap.values()))
     return out
 
 

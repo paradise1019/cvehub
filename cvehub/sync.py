@@ -91,6 +91,7 @@ def sync_hosts(con):
             bulk_error = True
     seen = set()
     names = collections.Counter(hostnames.key(_landscape_name(c)) for c in comps)
+    kernel_keys = collections.Counter(match_value(_landscape_name(c), primary_ip(c)) for c in comps)   # 和 KernelIndex 同一個比對值
     exact = collections.Counter(hostnames.norm(_landscape_name(c)) for c in comps)
     taken = set()                       # 這次已被接續的清單主機
     since = (datetime.datetime.now() - datetime.timedelta(days=CONTINUE_DAYS)).isoformat(timespec="seconds")
@@ -101,6 +102,7 @@ def sync_hosts(con):
         pk = ls.installed_packages(c["id"])
         pro = (c.get("ubuntu_pro_info") or {}).get("attached")
         hn = _landscape_name(c)
+        rel = norm_release(c.get("distribution"))
         ip = primary_ip(c)
         k = None
         api_error = bulk_error
@@ -111,7 +113,10 @@ def sync_hosts(con):
                 log.warning("kernel API 查詢 %s 失敗：%s", hn, e)
                 api_error = True
         elif kern is not None:
-            k = kern.get(match_value(hn, ip))
+            # Landscape 有好幾台電腦的比對值（或完整名稱）相同時，只認得出名稱完全相同的那筆（規則見 KernelIndex.get）
+            k, amb = kern.get(hn, ip, same_key=kernel_keys[match_value(hn, ip)], same_name=exact[hostnames.norm(hn)])
+            if amb:
+                log.warning("%s 的 kernel 資料分不出是哪一台（HOST_MATCH_KEY=%s）：%s；當成沒有這台的資料", hn, Config.HOST_MATCH_KEY, amb)
         # 既有主機：先用 landscape_id 找；找不到時接續清單匯入建的同一台主機（hostnames.choose：依 HOST_MATCH_KEY；
         # 這次 Landscape 有別台的比對鍵相同時只認名稱完全相同的。還沒有 landscape_id，啟用中或 CONTINUE_DAYS 天內出現過的：
         # 之前的 Landscape 同步已把它停用、之後才加入 Landscape 的也接得上），弱點歷史才不會斷。不接續的情況：
@@ -180,12 +185,16 @@ def sync_hosts(con):
             # 這裡先保守地判斷（同步途中、或中途失敗時，畫面上也不會有兩台同名）
             alone = names[key] == 1 and not any(r["active"] and r["id"] != (cur and cur["id"]) for r in group)
             db.upsert_host(con, cur and cur["id"], {
-                "hostname": hostnames.stored(hn, alone), "fqdn": hn, "title": c["title"], "ip": ip, "release": norm_release(c.get("distribution")),
+                "hostname": hostnames.stored(hn, alone), "fqdn": hn, "title": c["title"], "ip": ip, "release": rel,
                 "pro_attached": None if pro is None else int(bool(pro)), "last_seen": now(),
                 "kernel_release": krel, "kernel_version": kver, "kernel_collected_at": kcol, "kernel_status": kst,
             }, pk, landscape_id=c["id"])
         seen.add(c["id"])
         log.info("主機 %s（%s）：套件 %d、kernel %s（%s）", hn, ip or "-", len(pk), kver or "-", kst)
+        if rel not in Config.UBUNTU_RELEASES:
+            # 沒有這個版本的 OSV 資料：比對不出任何弱點，看起來會像全部修好了。畫面與 /healthz 也會提示（uncompared_hosts）
+            log.warning("主機 %s 的 Ubuntu 版本「%s」不在 UBUNTU_RELEASES（%s）：不會比對弱點", hn, rel or c.get("distribution") or "（空的）",
+                        ",".join(Config.UBUNTU_RELEASES))
     with con:
         for r in con.execute("SELECT id, landscape_id FROM host WHERE active=1").fetchall():
             if r["landscape_id"] not in seen and not Config.LANDSCAPE_QUERY:
@@ -221,11 +230,13 @@ def _old_kernels(pk):
 
 
 def _newest_kernel_version(pk, release):
+    """已安裝、和執行中的 kernel 同系列同 flavour 的 linux-image 最新版本（判斷重開機就好還是要先更新）。
+    別的 flavour（lowlatency 等）較新也不算：重開機後還是開同一個 flavour"""
     m = KERNEL_ABI.match("linux-image-" + release)
     best = None
     for n, v in pk.items():
         mm = KERNEL_ABI.match(n)
-        if m and mm and mm.group(1) == m.group(1) and n.startswith("linux-image-"):
+        if m and mm and mm.group(1) == m.group(1) and mm.group(3) == m.group(3) and n.startswith("linux-image-"):
             if best is None or vercmp(v, best) > 0:
                 best = v
     return best
@@ -276,16 +287,13 @@ def _source_map(con, items, base, proe, cache=None):
     return srcmap
 
 
-def evaluate_host(con, h, cache=None):
-    """回傳這台主機目前的比對結果 {key: row}；cache：同一次同步裡各主機共用的 dict（可不給）"""
-    pk = {r["name"]: r["version"] for r in con.execute("SELECT name,version FROM host_package WHERE host_id=?", (h["id"],))}
+def select_items(con, h, pk, cache=None, quiet=False):
+    """這台主機要比對的套件與對應的 source：回傳 (items, srcmap, newest_k)
+      items：[(binary, version, location)]；srcmap：{binary: source}；newest_k：同 flavour 最新的已安裝 kernel（判斷重開機）
+    執行中的 kernel 已知時，kernel 套件只看執行中的那一個（其他已安裝的 kernel 不比對）；不知道時看已安裝的、略過舊的。
+    比對（evaluate_host）與畫面上的「尚無修正」（period.host_sources）都用這裡，兩邊看的套件才會一樣。quiet：不記 log"""
     rel = h["release"]
     base, proe = "Ubuntu:%s:LTS" % rel, "Ubuntu:Pro:%s:LTS" % rel
-    if Config.PRO_MODE == "auto":
-        has_pro = bool(h["pro_attached"]) if h["pro_attached"] is not None else any("+esm" in v for v in pk.values())
-    else:
-        has_pro = Config.PRO_MODE == "yes"
-
     items = []     # (binary, version, location)
     # ok＝這次的資料；error／stale／missing＝沿用上一次可信的資料（沒有可沿用的時候 kernel_release 是空的）
     running_kernel = h["kernel_status"] in ("ok", "error", "stale", "missing") and h["kernel_version"] and h["kernel_release"]
@@ -303,11 +311,26 @@ def evaluate_host(con, h, cache=None):
     if running_kernel and not any(i[0] in srcmap for i in items if i[2] == "running-kernel"):
         # 執行中的 kernel 對不到任何 source（自己編的 kernel、OSV 沒有的變體）：之前會連已安裝的 kernel 套件都不看，
         # 這台就沒有任何 kernel 弱點也沒有提示。改成和沒有執行中 kernel 資料時一樣，檢查已安裝的 kernel
-        log.warning("主機 %s 執行中的 kernel %s 在 OSV 裡找不到對應的套件：改檢查已安裝的 kernel 套件", h["hostname"], h["kernel_release"])
+        if not quiet:
+            log.warning("主機 %s 執行中的 kernel %s 在 OSV 裡找不到對應的套件：改檢查已安裝的 kernel 套件", h["hostname"], h["kernel_release"])
         skip = set() if Config.CHECK_OLD_KERNELS else _old_kernels(pk)
         items = [(n, v, "installed") for n, v in pk.items() if n not in skip]
         newest_k = None
         srcmap = _source_map(con, items, base, proe, cache)
+    return items, srcmap, newest_k
+
+
+def evaluate_host(con, h, cache=None):
+    """回傳這台主機目前的比對結果 {key: row}；cache：同一次同步裡各主機共用的 dict（可不給）"""
+    pk = {r["name"]: r["version"] for r in con.execute("SELECT name,version FROM host_package WHERE host_id=?", (h["id"],))}
+    rel = h["release"]
+    base, proe = "Ubuntu:%s:LTS" % rel, "Ubuntu:Pro:%s:LTS" % rel
+    if Config.PRO_MODE == "auto":
+        has_pro = bool(h["pro_attached"]) if h["pro_attached"] is not None else any("+esm" in v for v in pk.values())
+    else:
+        has_pro = Config.PRO_MODE == "yes"
+
+    items, srcmap, newest_k = select_items(con, h, pk, cache)
     vul = {}
     srcs = sorted(set(srcmap.values()))
     for i in range(0, len(srcs), 500):
@@ -418,6 +441,13 @@ def prune_history(con, cutoff):
                    AND id NOT IN (SELECT osv_import_id FROM sync_run WHERE osv_import_id IS NOT NULL)""", (cutoff,))
     con.execute("""DELETE FROM vex_import WHERE imported_at < ? AND status != 'ok'
                    AND id != (SELECT MAX(id) FROM vex_import)""", (cutoff,))
+
+
+def uncompared_hosts(con):
+    """啟用中、Ubuntu 版本不在 UBUNTU_RELEASES 的主機名稱：沒有那個版本的資料，比對不出任何弱點（畫面與 /healthz 提示）"""
+    rels = list(Config.UBUNTU_RELEASES)
+    return [r[0] for r in con.execute("SELECT hostname FROM host WHERE active=1 AND COALESCE(release,'') NOT IN (%s) ORDER BY hostname"
+                                      % ",".join("?" * len(rels)), rels)]
 
 
 def run_sync(con):

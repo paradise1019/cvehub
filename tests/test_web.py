@@ -174,6 +174,14 @@ class WebTest(unittest.TestCase):
         r = self.c.get("/healthz")                      # 同步執行中：上一次的問題不能暫時消失
         self.assertEqual((r.status_code, r.get_json()["problems"]), (503, ["hosts_not_evaluated"]))
 
+    def test_uncompared_release_shown(self):
+        """Ubuntu 版本不在 UBUNTU_RELEASES 的主機：每頁提示、/healthz 回報（之前看起來像全部修好了）"""
+        self.env.con.execute("INSERT INTO sync_run(started_at,finished_at,status) VALUES (?,?,'ok')", (sync.now(), sync.now()))
+        self.env.con.execute("INSERT INTO host(landscape_id,hostname,release,kernel_status,active) VALUES (1,'old01','18.04','disabled',1)")
+        self.env.con.commit()
+        self.assertIn("hosts_release_not_compared", self.c.get("/healthz").get_json()["problems"])
+        self.assertIn("old01", self.c.get("/").get_data(as_text=True))
+
     def test_bad_input_400_and_redirect(self):
         h = dict(self.auth, Origin="http://localhost")
         self.assertEqual(self.post("/exceptions", headers=h, data={"delete": "x"}).status_code, 400)

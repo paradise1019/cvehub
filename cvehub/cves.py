@@ -124,8 +124,8 @@ def details(con, cves, releases, variants):
 # ---------------------------------------------------------------- 事先算好的整體狀態表
 
 def installed_sources(con):
-    """主機（啟用中）有裝的 source 套件：和 period.host_sources 相同的對應（binary→source，新版 kernel 還沒在 binmap 時用同系列推測），
-    但用一個查詢做完（不逐台主機查）"""
+    """主機（啟用中）有裝的 source 套件（binary→source，新版 kernel 還沒在 binmap 時用同系列推測），用一個查詢做完（不逐台主機查）。
+    只用來決定歷年弱點要列哪些 kernel 變體：算所有已安裝的套件（period.host_sources 只算執行中的 kernel，用途不同）"""
     out = {r[0] for r in con.execute(
         "SELECT DISTINCT b.source FROM host h JOIN host_package p ON p.host_id=h.id "
         "JOIN binmap b ON b.binary=p.name AND b.ecosystem IN ('Ubuntu:' || h.release || ':LTS', 'Ubuntu:Pro:' || h.release || ':LTS') "

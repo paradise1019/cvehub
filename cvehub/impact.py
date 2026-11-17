@@ -7,6 +7,7 @@
 - 不受影響：主機有裝這個套件，但官方狀態是 Fixed（且主機已是修正版本）、Not affected 或 Not in release
 """
 from .config import PRIO, Config
+from .cves import known_variants
 from .kernel import kernel_variant
 from .period import cell_text, host_sources, resolve
 from .sync import ExceptionMatcher, active_exceptions
@@ -127,7 +128,9 @@ def cve_detail(con, cve):
         osv.setdefault((r["source"], rel), {})[ch] = r["fixed"] or ""
     have_vex = bool(con.execute("SELECT 1 FROM vex_import WHERE active=1").fetchone())
     hs = host_sources(con)
-    installed = {s for _, srcs in hs.values() for s in srcs}
+    # 官方狀態表要列哪些 kernel 變體：和歷年弱點頁一樣看所有已安裝的套件（host_sources 只算執行中的 kernel）；
+    # 再加上執行中的（歷年弱點的狀態表還沒重算時，剛換上的變體也要列）
+    installed = known_variants(con) | {s for _, srcs in hs.values() for s in srcs}
     official = {}
     for src in sorted({s for s, _ in vex} | {s for s, _ in osv}):
         if kernel_variant(src) and src not in installed:
@@ -139,25 +142,31 @@ def cve_detail(con, cve):
         if any(c != "none" for c, _ in cells.values()):
             official[src] = cells
     match = ExceptionMatcher(active_exceptions(con))
-    findings = {}
+    findings, finding_srcs = {}, set()
     for f in con.execute("SELECT * FROM finding WHERE cve=? ORDER BY resolved_at IS NULL DESC, first_seen", (cve,)):
         findings.setdefault((f["host_id"], f["source"] or f["package"]), []).append(f)
+        if f["source"]:
+            finding_srcs.add((f["host_id"], f["source"]))
     hosts = []
     for hid, (rel, srcs) in hs.items():
         h = con.execute("SELECT * FROM host WHERE id=?", (hid,)).fetchone()
-        for src in sorted(srcs & (set(official) | {s for (x, s) in findings if x == hid})):
+        # 有比對結果的 source 一律列（換了 kernel、或這次比對失敗時，舊 kernel 的紀錄也看得到）
+        for src in sorted((srcs & set(official)) | {s for (x, s) in finding_srcs if x == hid}):
             code, text = official.get(src, {}).get(rel, ("none", "—"))
             fs = findings.get((hid, src), [])
             open_f = [f for f in fs if not f["resolved_at"]]
-            if open_f and open_f[0]["status"] in ("fix-available", "fix-in-pro"):
+            pend = [f for f in open_f if f["status"] in ("fix-available", "fix-in-pro")]
+            # 同一個 source 可能有好幾筆（不同套件）：任何一筆待更新就是待更新；還有未解決的（尚無修正）不能算已修正
+            if pend:
                 st = "pending"
-            elif code in UNRESOLVED:
+            elif open_f or (code in UNRESOLVED and src in srcs):
+                # 官方狀態的「尚無修正」只算這台現在比對的套件；沒在執行的舊 kernel 等（只有比對紀錄）照紀錄判斷
                 st = "nofix"
             elif fs:
                 st = "fixed"
             else:
                 st = "ok"
-            f = (open_f or fs or [None])[0]
+            f = (pend or open_f or fs or [None])[0]
             e = match(h["hostname"], cve, h["fqdn"])
             hosts.append({"hostname": h["hostname"], "host_id": hid, "release": rel, "package": src, "state": st,
                           "state_label": STATE_LABEL[st], "official": text, "official_code": code,

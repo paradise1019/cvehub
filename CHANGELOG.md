@@ -2,6 +2,19 @@
 
 更新方式見 README「6. 更新、回復、備份」：解開新版 zip，`sudo bash <解開的目錄>/install.sh`。
 
+## 0.9.14
+程式碼審查找到的邏輯錯誤：
+- Landscape 主機的 Ubuntu 版本不在 `UBUNTU_RELEASES`（例如 18.04、還沒加進設定的新版本、或版本是空的）時，比對不出任何弱點，看起來像全部修好了，而且沒有任何提示。現在同步時記 log、每一頁上方列出這些主機、`/healthz` 回報 `hosts_release_not_compared`（主機清單匯入本來就會拒絕）。刻意不比對的主機用 `LANDSCAPE_QUERY` 排除
+- CVE 頁的主機狀態：同一個套件有好幾筆比對結果時只看最早的一筆，有「待更新」的主機可能沒顯示成待更新；還有未解決（尚無修正）結果的主機可能顯示成「已修正」。現在任何一筆待更新就是待更新，還有未解決的就是尚無修正
+- kernel API（bulk 模式）的資料依短名稱對應時，兩台短名稱相同的主機（`web01.a…`、`web01.b…`）會拿到同一筆 kernel 資料，還跑著舊 kernel 的那台被當成已重開機。現在名稱完全相同的優先，同一台有好幾筆時取收集時間最新的；Landscape 有兩台名稱完全相同的電腦、或比對值相同而 kernel API 沒有名稱完全相同的紀錄時，當成沒有這台的資料並在 log 寫明原因。設了 `LANDSCAPE_QUERY` 時不再用名稱不同網域的紀錄（無法確認是不是同一台）。`HOST_MATCH_KEY=ip` 時，Landscape 有好幾台電腦是同一個 IP 就當成沒有資料（之前會拿到同一筆）
+- 執行中 kernel 的建議動作：找「已安裝的最新 kernel」時沒有分 flavour，裝了較新的 lowlatency 時會建議「重開機」就好（重開後還是開舊的 generic）。現在只看同 flavour 的
+- 受影響主機頁與 CVE 頁的「尚無修正」改成和比對一樣：執行中的 kernel 已知時只算它，其他已安裝、沒在執行的 kernel（舊 ABI、停止支援的 HWE）不算。之前會列出一堆舊 HWE 系列的弱點。輸出報表（Excel）的 HWE 列同樣只留各版本最新的系列與主機上執行中的系列。CVE 頁照樣列出有比對紀錄的套件（換了 kernel 之後舊 kernel 的已修正紀錄看得到），官方狀態表的 kernel 變體和歷年弱點頁一樣看所有已安裝的套件
+- 每次同步自動輸出的比對結果（`data/reports/cve-*.csv`／`.json`）從來不刪，主機多時 `/data` 會被塞滿：新設定 `REPORT_KEEP_FILES`（預設 30，每一種留最新 30 份；0＝不刪）。只刪檔名是 `cve-detail-YYYYMMDD-HHMM.csv` 這種格式的，網頁下載的 Excel、自己放進去的檔案不動
+- kernel API（bulk 模式）有幾筆資料不是物件、沒有主機欄位，或主機欄位不是文字時，略過那幾筆並記 log，其他主機照常；有資料卻一筆都用不上（多半是 `KERNEL_API_FIELD_HOST` 設錯）時整批失敗，`/healthz` 回報 `kernel_api_error`（之前每台都悄悄變成沒有 kernel 資料）
+- kernel API 的主機名稱結尾有點（`web01.example.com.`）時，`HOST_MATCH_KEY=hostname` 對不到：比對值改成不看結尾的點
+- summary CSV 依主機分組，不再依主機名稱：兩台名稱完全相同（複製的 VM 沒改名）時不會被合成一行
+- `.env.example`：`REPORT_FORMATS` 只支援 csv、json（之前寫了 xlsx，但不會產生）；設了不支援的格式會記 log
+
 ## 0.9.13
 x86 主機被算成 RISC-V kernel（`linux-riscv`）：
 - Ubuntu 的 RISC-V kernel 產生的套件名稱和 x86 的一般 kernel 一樣（例如 `linux-image-6.8.0-60-generic`），OSV 資料沒有寫架構。之前先匯入的對應優先，部分 ABI（24.04 的 6.8.0-47／53／55／60、HWE 6.14／6.17、22.04 的 HWE 6.5／6.8 等）的 x86 主機被算成裝了 `linux-riscv`：CVE 頁多出 `linux-riscv`「尚無修正／受影響」，還有拿 riscv 的修正版本比出來的假「待更新」（例如 `6.8.0-60.63 → 6.8.0-60.63.1`）

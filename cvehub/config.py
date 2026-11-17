@@ -92,6 +92,7 @@ class Config:
     DB_PATH = _s("DB_PATH", "/data/cvehub.sqlite3")
     REPORT_DIR = _s("REPORT_DIR", "/data/reports")
     REPORT_FORMATS = [f.strip() for f in _s("REPORT_FORMATS", "csv").split(",") if f.strip()]
+    REPORT_KEEP_FILES = _i("REPORT_KEEP_FILES", 30)
     HISTORY_KEEP_DAYS = _i("HISTORY_KEEP_DAYS", 365)
 
     WEB_LISTEN = _s("WEB_LISTEN", "0.0.0.0")

@@ -4,11 +4,15 @@ import csv
 import datetime
 import io
 import json
+import logging
 import os
+import re
 import threading
 
 from .config import PRIO, Config
 from .sync import ExceptionMatcher, active_exceptions
+
+log = logging.getLogger(__name__)
 
 COLUMNS = ["hostname", "release", "cve", "priority", "status", "package", "installed", "running", "fixed",
            "location", "action", "repo", "source", "first_seen", "last_seen", "resolved_at", "exception"]
@@ -196,13 +200,13 @@ def _overview_counts(con, out, pairs, where, names, today):
 
 
 def summary_by_host_cve(rows):
-    """一個 (主機, CVE) 一行，packages 合併"""
+    """一個 (主機, CVE) 一行，packages 合併。依主機 id 分組：兩台名稱完全相同（複製的 VM 沒改名）時不會被合成一行"""
     g = {}
     for x in rows:
-        g.setdefault((x["hostname"], x["cve"]), []).append(x)
+        g.setdefault((x["host_id"], x["cve"]), []).append(x)
     out = []
-    for (hn, cve), xs in g.items():
-        out.append({"hostname": hn, "cve": cve, "priority": xs[0]["priority"], "status": xs[0]["status"],
+    for (_, cve), xs in g.items():
+        out.append({"hostname": xs[0]["hostname"], "cve": cve, "priority": xs[0]["priority"], "status": xs[0]["status"],
                     "packages": "; ".join("%s %s>%s [%s]" % (x["package"], x["running"] or x["installed"], x["fixed"] or "(no fix)", x["action"])
                                           for x in xs),
                     "first_seen": min(x["first_seen"] for x in xs), "exception": xs[0]["exception"]})
@@ -224,6 +228,26 @@ def to_csv(rows, columns):
     return "﻿" + buf.getvalue()      # BOM：Excel 直接開啟中文不亂碼
 
 
+# 自動輸出的檔名（write_reports：cve-<種類>-YYYYMMDD-HHMM.<副檔名>）；保留份數只管完全符合的，手動輸出的 Excel、
+# 自己放進來的檔案（cve-detail-before-upgrade.csv 之類）不動
+REPORT_PATTERNS = [re.compile(r"^cve-%s-\d{8}-\d{4}\.%s$" % (kind, ext)) for kind, ext in
+                   (("detail", "csv"), ("summary", "csv"), ("detail", "json"))]
+
+
+def prune_reports():
+    """自動輸出的比對結果每一種只留最新 REPORT_KEEP_FILES 份（檔名含時間，依檔名排序）：之前從不刪，/data 會被塞滿"""
+    keep = Config.REPORT_KEEP_FILES
+    if keep <= 0:
+        return
+    names = os.listdir(Config.REPORT_DIR)
+    for pat in REPORT_PATTERNS:
+        for old in sorted(os.path.join(Config.REPORT_DIR, n) for n in names if pat.match(n))[:-keep]:
+            try:
+                os.remove(old)
+            except OSError as e:
+                log.warning("無法刪除舊報表 %s：%s", old, e)
+
+
 def write_reports(con):
     os.makedirs(Config.REPORT_DIR, exist_ok=True)
     rows = query_findings(con)
@@ -237,3 +261,6 @@ def write_reports(con):
         elif fmt == "json":
             with open(os.path.join(Config.REPORT_DIR, "cve-detail-%s.json" % stamp), "w") as f:
                 json.dump(rows, f, ensure_ascii=False, indent=1)
+        else:
+            log.warning("REPORT_FORMATS 的 %s 不支援（只有 csv、json），略過", fmt)
+    prune_reports()
